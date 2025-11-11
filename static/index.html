@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Health Claim Quality Check API</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>Health Claim QC</h2>
+            </div>
+            <div class="sidebar-content">
+                <div class="nav-section">
+                    <button class="nav-btn active" data-page="dashboard">
+                        <span>📊</span> Dashboard
+                    </button>
+                    <button class="nav-btn" data-page="process">
+                        <span>🔍</span> Process Claim
+                    </button>
+                    <button class="nav-btn" data-page="claims">
+                        <span>📋</span> Claims History
+                    </button>
+                </div>
+            </div>
+            <div class="sidebar-footer">
+                <div class="user-info" id="userInfo">
+                    <span>Health Claim QC System</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <!-- Dashboard Page -->
+            <div id="dashboard-page" class="page active">
+                <div class="page-header">
+                    <h1>Dashboard</h1>
+                </div>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="total-claims">0</div>
+                        <div class="stat-label">Total Claims</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="passed-claims">0</div>
+                        <div class="stat-label">Passed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="failed-claims">0</div>
+                        <div class="stat-label">Failed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="avg-accuracy">0%</div>
+                        <div class="stat-label">Avg Accuracy</div>
+                    </div>
+                </div>
+                <div class="info-section">
+                    <h2>API Information</h2>
+                    <div class="info-box">
+                        <p><strong>Base URL:</strong> <code id="base-url"></code></p>
+                        <p><strong>Status:</strong> <span id="api-status" class="status-indicator">Checking...</span></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Process Claim Page -->
+            <div id="process-page" class="page">
+                <div class="page-header">
+                    <h1>Process Health Claim</h1>
+                </div>
+                <div class="process-container">
+                    <div class="upload-section">
+                        <h3>Upload Documents</h3>
+                        <form id="claim-form">
+                            <div class="form-group">
+                                <label>Upload Documents (PDF or Images)</label>
+                                <p class="form-help">You can upload one or multiple documents. The system will automatically identify document types.</p>
+                                <input type="file" id="documents" accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp" multiple required>
+                                <div id="file-list" class="file-list"></div>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="include-payer-checklist" checked> Include Payer Specific Checklist
+                                </label>
+                                <p class="form-help">Optional: Check payer-specific document requirements</p>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="enable-tariff-check"> Enable Tariff Checking
+                                </label>
+                                <p class="form-help">Requires Hospital ID and Payer ID below</p>
+                            </div>
+                            <div class="form-group" id="tariff-fields" style="display: none;">
+                                <label>Hospital ID</label>
+                                <input type="text" id="hospital-id" placeholder="Enter hospital ID">
+                            </div>
+                            <div class="form-group" id="tariff-fields-payer" style="display: none;">
+                                <label>Payer ID</label>
+                                <input type="text" id="payer-id" placeholder="Enter payer ID">
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="ignore-discrepancies"> Ignore ID Mismatches (Payer vs Hospital)
+                                </label>
+                                <p class="form-help">Ignore patient ID mismatches between payer approvals and hospital documents</p>
+                            </div>
+                            <button type="submit" class="btn-primary">Process Claim</button>
+                        </form>
+                    </div>
+                    <div class="progress-section">
+                        <h3>Processing Status</h3>
+                        <div id="progress-container">
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+                            </div>
+                            <div id="progress-messages" class="progress-messages"></div>
+                        </div>
+                    </div>
+                    <div class="results-section" id="results-section" style="display: none;">
+                        <h3>Results</h3>
+                        <div id="results-content"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Claims History Page -->
+            <div id="claims-page" class="page">
+                <div class="page-header">
+                    <h1>Claims History</h1>
+                </div>
+                <div class="claims-container">
+                    <div id="claims-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <script src="app.js"></script>
+</body>
+</html>
+
