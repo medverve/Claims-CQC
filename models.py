@@ -1,5 +1,5 @@
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
+from datetime import datetime, date
 import secrets
 import hashlib
 
@@ -12,7 +12,7 @@ class User(db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(datetime.UTC))
     is_admin = db.Column(db.Boolean, default=False)
     
     api_keys = db.relationship('APIKey', backref='user', lazy=True, cascade='all, delete-orphan')
@@ -27,7 +27,7 @@ class APIKey(db.Model):
     key_prefix = db.Column(db.String(20), nullable=False)  # First 8 chars for display
     name = db.Column(db.String(100), nullable=False)
     is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(datetime.UTC))
     last_used = db.Column(db.DateTime, nullable=True)
     
     @staticmethod
@@ -57,7 +57,7 @@ class Tariff(db.Model):
     price = db.Column(db.Float, nullable=False)
     effective_from = db.Column(db.Date, nullable=False)
     effective_to = db.Column(db.Date, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(datetime.UTC))
     
     __table_args__ = (db.Index('idx_hospital_payer', 'hospital_id', 'payer_id'),)
 
@@ -72,7 +72,7 @@ class Claim(db.Model):
     status = db.Column(db.String(50), default='processing')
     accuracy_score = db.Column(db.Float, nullable=True)
     passed = db.Column(db.Boolean, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(datetime.UTC))
     completed_at = db.Column(db.DateTime, nullable=True)
     
     results = db.relationship('ClaimResult', backref='claim', lazy=True, cascade='all, delete-orphan')
@@ -84,5 +84,18 @@ class ClaimResult(db.Model):
     claim_id = db.Column(db.Integer, db.ForeignKey('claims.id'), nullable=False)
     result_type = db.Column(db.String(50), nullable=False)  # 'patient_details', 'dates', 'line_items', 'reports', 'general_checklist', 'line_item_checklist'
     result_data = db.Column(db.Text, nullable=False)  # JSON string
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(datetime.UTC))
+
+
+class RequestLog(db.Model):
+    __tablename__ = 'request_logs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    ip_address = db.Column(db.String(100), nullable=False)
+    request_date = db.Column(db.Date, nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(datetime.UTC))
+
+    __table_args__ = (
+        db.UniqueConstraint('ip_address', 'request_date', name='uq_request_log_ip_date'),
+    )
 

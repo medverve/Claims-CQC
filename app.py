@@ -3,16 +3,17 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
-from models import db, User, APIKey, Claim, ClaimResult, Tariff
+from models import db, User, APIKey, Claim, ClaimResult, Tariff, RequestLog
 from config import Config
 from document_processor import DocumentProcessor
 from quality_checks import QualityChecker
 import os
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 from functools import wraps
 import threading
+from sqlalchemy.exc import IntegrityError
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 app.config.from_object(Config)
@@ -60,6 +61,31 @@ def require_api_key(f):
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in Config.ALLOWED_EXTENSIONS
+
+
+def get_client_ip():
+    """Derive client IP, considering proxies."""
+    forwarded_for = request.headers.get('X-Forwarded-For', '')
+    if forwarded_for:
+        return forwarded_for.split(',')[0].strip()
+    return (request.remote_addr or '').strip() or 'unknown'
+
+
+def record_daily_request(ip_address: str) -> bool:
+    """Record request for rate limiting. Returns True if allowed, False if limit exceeded."""
+    today = date.today()
+    existing = RequestLog.query.filter_by(ip_address=ip_address, request_date=today).first()
+    if existing:
+        return False
+
+    log = RequestLog(ip_address=ip_address, request_date=today)
+    db.session.add(log)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return False
+    return True
 
 # SocketIO Events
 @socketio.on('connect')
@@ -457,6 +483,10 @@ def process_claim():
     """Process health claim documents - accepts any number of documents"""
     if 'documents' not in request.files:
         return jsonify({'error': 'No documents provided'}), 400
+    
+    client_ip = get_client_ip()
+    if not record_daily_request(client_ip):
+        return jsonify({'error': 'Rate limit exceeded. Only one claim processing request is allowed per day from this IP address.'}), 429
     
     files = request.files.getlist('documents')
     hospital_id = request.form.get('hospital_id', '').strip()

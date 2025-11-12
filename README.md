@@ -81,6 +81,22 @@ The application will be available at:
 - Frontend: http://localhost:5000
 - API: http://localhost:5000/api
 
+## Docker Deployment
+
+You can containerize the application with the provided `Dockerfile`.
+
+1. Ensure you have a `.env` file containing `GEMINI_API_KEY` and other configuration values.
+2. Build the Docker image:
+   ```bash
+   docker build -t health-claim-qc .
+   ```
+3. Run the container:
+   ```bash
+   docker run --env-file .env -p 5000:5000 health-claim-qc
+   ```
+   - The app will be accessible at http://localhost:5000
+   - Uploaded documents are stored inside the container; mount a volume if persistence is required
+
 ## Usage
 
 ### Frontend Interface
@@ -124,10 +140,13 @@ All API endpoints (except `/api/health` and user management) require an API key 
 X-API-Key: your-api-key-here
 ```
 
+### Using the API
+
+> **Rate limit:** Each client IP is limited to **one claim processing request per day**. Subsequent requests within the same day will return HTTP 429.
+
 #### Process a Claim
 ```bash
 curl -X POST http://localhost:5000/api/claims/process \
-  -H "X-API-Key: your-api-key" \
   -F "documents=@insurer.pdf" \
   -F "documents=@approval.pdf" \
   -F "documents=@hospital.pdf" \
