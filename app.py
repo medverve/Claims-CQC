@@ -3,24 +3,30 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
-from models import db, User, APIKey, Claim, ClaimResult, Tariff, RequestLog
+from firestore_service import firestore_service
 from config import Config
 from document_processor import DocumentProcessor
 from quality_checks import QualityChecker
 import os
 import json
 import uuid
+import hashlib
+import secrets
 from datetime import datetime, date
 from functools import wraps
 import threading
-from sqlalchemy.exc import IntegrityError
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 app.config.from_object(Config)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-db.init_app(app)
+# Ensure default admin exists in Firestore
+firestore_service.ensure_default_admin(
+    username='admin',
+    email='admin@example.com',
+    password_hash=generate_password_hash('admin123')
+)
 
 # Create upload directory
 os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
@@ -30,12 +36,22 @@ os.makedirs('static', exist_ok=True)
 doc_processor = DocumentProcessor()
 quality_checker = None
 
+
 def get_quality_checker():
     """Get or create quality checker instance"""
     global quality_checker
     if quality_checker is None:
         quality_checker = QualityChecker()
     return quality_checker
+
+
+def hash_api_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def generate_api_token() -> str:
+    return f"hc_{secrets.token_urlsafe(32)}"
+
 
 # API Key Authentication Decorator
 def require_api_key(f):
@@ -44,20 +60,18 @@ def require_api_key(f):
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
         if not api_key:
             return jsonify({'error': 'API key required'}), 401
-        
-        key_hash = APIKey.hash_key(api_key)
-        api_key_obj = APIKey.query.filter_by(key_hash=key_hash, is_active=True).first()
-        
-        if not api_key_obj:
+
+        key_hash = hash_api_key(api_key)
+        api_key_doc = firestore_service.find_api_key_by_hash(key_hash)
+        if not api_key_doc:
             return jsonify({'error': 'Invalid or inactive API key'}), 401
-        
-        # Update last used
-        api_key_obj.last_used = datetime.now(datetime.UTC)
-        db.session.commit()
-        
-        request.api_user = api_key_obj.user
+
+        firestore_service.update_api_key_last_used(api_key_doc['id'])
+        request.api_user_id = api_key_doc.get('user_id')
+        request.api_user = firestore_service.get_user(api_key_doc['user_id']) if api_key_doc.get('user_id') else None
         return f(*args, **kwargs)
     return decorated_function
+
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in Config.ALLOWED_EXTENSIONS
@@ -74,18 +88,7 @@ def get_client_ip():
 def record_daily_request(ip_address: str) -> bool:
     """Record request for rate limiting. Returns True if allowed, False if limit exceeded."""
     today = date.today()
-    existing = RequestLog.query.filter_by(ip_address=ip_address, request_date=today).first()
-    if existing:
-        return False
-
-    log = RequestLog(ip_address=ip_address, request_date=today)
-    db.session.add(log)
-    try:
-        db.session.commit()
-    except IntegrityError:
-        db.session.rollback()
-        return False
-    return True
+    return firestore_service.record_request(ip_address, today)
 
 # SocketIO Events
 @socketio.on('connect')
@@ -120,118 +123,109 @@ def register_user():
     email = data.get('email')
     password = data.get('password')
     is_admin = data.get('is_admin', False)
-    
+
     if not username or not email or not password:
         return jsonify({'error': 'Username, email, and password required'}), 400
-    
-    if User.query.filter_by(username=username).first():
+
+    if firestore_service.get_user_by_username(username):
         return jsonify({'error': 'Username already exists'}), 400
-    
-    if User.query.filter_by(email=email).first():
+
+    if firestore_service.get_user_by_email(email):
         return jsonify({'error': 'Email already exists'}), 400
-    
-    user = User(
+
+    user_id = firestore_service.create_user(
         username=username,
         email=email,
         password_hash=generate_password_hash(password),
         is_admin=is_admin
     )
-    db.session.add(user)
-    db.session.commit()
-    
-    return jsonify({'message': 'User created successfully', 'user_id': user.id}), 201
+
+    return jsonify({'message': 'User created successfully', 'user_id': user_id}), 201
+
 
 @app.route('/api/users/login', methods=['POST'])
 def login():
     data = request.json
     username = data.get('username')
     password = data.get('password')
-    
-    user = User.query.filter_by(username=username).first()
-    if not user or not check_password_hash(user.password_hash, password):
+
+    user = firestore_service.get_user_by_username(username)
+    if not user or not check_password_hash(user.get('password_hash', ''), password):
         return jsonify({'error': 'Invalid credentials'}), 401
-    
+
     return jsonify({
         'message': 'Login successful',
-        'user_id': user.id,
-        'username': user.username,
-        'is_admin': user.is_admin
+        'user_id': user['id'],
+        'username': user['username'],
+        'is_admin': user.get('is_admin', False)
     })
 
 # API Key Management
 @app.route('/api/api-keys', methods=['GET'])
 def list_api_keys():
-    user_id = request.args.get('user_id', type=int)
+    user_id = request.args.get('user_id') or getattr(request, 'api_user_id', None)
     if not user_id:
         return jsonify({'error': 'user_id required'}), 400
-    
-    user = User.query.get_or_404(user_id)
-    api_keys = APIKey.query.filter_by(user_id=user_id).all()
-    
+
+    api_keys = firestore_service.list_api_keys(user_id)
+
     return jsonify({
         'api_keys': [{
-            'id': key.id,
-            'name': key.name,
-            'key_prefix': key.key_prefix,
-            'is_active': key.is_active,
-            'created_at': key.created_at.isoformat(),
-            'last_used': key.last_used.isoformat() if key.last_used else None
+            'id': key['id'],
+            'name': key.get('name'),
+            'key_prefix': key.get('key_prefix'),
+            'is_active': key.get('is_active'),
+            'created_at': key.get('created_at'),
+            'last_used': key.get('last_used')
         } for key in api_keys]
     })
 
+
 @app.route('/api/api-keys', methods=['POST'])
+@require_api_key
 def create_api_key():
     data = request.json
-    user_id = data.get('user_id')
+    user_id = data.get('user_id') or getattr(request, 'api_user_id', None)
     name = data.get('name', 'Default API Key')
-    
+
     if not user_id:
         return jsonify({'error': 'user_id required'}), 400
-    
-    user = User.query.get_or_404(user_id)
-    
-    # Generate new API key
-    api_key = APIKey.generate_key()
-    key_hash = APIKey.hash_key(api_key)
-    key_prefix = api_key[:8]
-    
-    api_key_obj = APIKey(
-        user_id=user_id,
-        key_hash=key_hash,
-        key_prefix=key_prefix,
-        name=name
-    )
-    db.session.add(api_key_obj)
-    db.session.commit()
-    
-    # Return the full key only once
+
+    if not firestore_service.get_user(user_id):
+        return jsonify({'error': 'User not found'}), 404
+
+    api_key_token = generate_api_token()
+    key_hash = hash_api_key(api_key_token)
+    key_prefix = api_key_token[:8]
+    key_id = firestore_service.create_api_key(user_id, key_hash, key_prefix, name)
+
     return jsonify({
         'message': 'API key created successfully',
-        'api_key': api_key,  # Only shown once
+        'api_key': api_key_token,
         'key_prefix': key_prefix,
-        'id': api_key_obj.id,
+        'id': key_id,
         'warning': 'Save this API key securely. It will not be shown again.'
     }), 201
 
-@app.route('/api/api-keys/<int:key_id>', methods=['DELETE'])
+
+@app.route('/api/api-keys/<key_id>', methods=['DELETE'])
+@require_api_key
 def delete_api_key(key_id):
-    api_key = APIKey.query.get_or_404(key_id)
-    api_key.is_active = False
-    db.session.commit()
+    firestore_service.deactivate_api_key(key_id)
     return jsonify({'message': 'API key deactivated'})
 
-# Claim Processing
+
 def process_claim_async(claim_id, documents_data, session_id, ignore_discrepancies=False, include_payer_checklist=True):
     """Process claim in background thread"""
     try:
         with app.app_context():
-            claim = Claim.query.get(claim_id)
+            claim = firestore_service.get_claim(claim_id)
             if not claim:
                 return
             
-            # Store flags in claim object for later use
-            claim._ignore_discrepancies = ignore_discrepancies
-            claim._include_payer_checklist = include_payer_checklist
+            ignore_discrepancies_flag = claim.get('ignore_discrepancies', ignore_discrepancies)
+            include_payer_checklist_flag = claim.get('include_payer_checklist', include_payer_checklist)
+            tariff_result = None
             
             socketio.emit('progress', {
                 'step': 'initializing',
@@ -303,13 +297,7 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
             
             # Check patient details across ALL documents
             patient_result = checker.check_patient_details(analyzed_data)
-            claim_result = ClaimResult(
-                claim_id=claim_id,
-                result_type='patient_details',
-                result_data=json.dumps(patient_result)
-            )
-            db.session.add(claim_result)
-            db.session.commit()
+            firestore_service.add_claim_result(claim_id, 'patient_details', patient_result)
             
             # Handle case where analyzed_data might not have all document types
             if not analyzed_data.get('insurer') or not analyzed_data.get('approval') or not analyzed_data.get('hospital'):
@@ -329,13 +317,7 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
             line_items = analyzed_data.get('hospital', {}).get('line_items', [])
             approval_dates = analyzed_data.get('approval', {}).get('approval_dates', {})
             date_result = checker.check_dates(line_items, approval_dates)
-            claim_result = ClaimResult(
-                claim_id=claim_id,
-                result_type='dates',
-                result_data=json.dumps(date_result)
-            )
-            db.session.add(claim_result)
-            db.session.commit()
+            firestore_service.add_claim_result(claim_id, 'dates', date_result)
             
             # Step 5: Report Checks
             socketio.emit('progress', {
@@ -347,13 +329,7 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
             reports = analyzed_data.get('hospital', {}).get('reports', [])
             invoice_data = analyzed_data.get('hospital', {}).get('invoice', {})
             report_result = checker.check_reports(reports, invoice_data)
-            claim_result = ClaimResult(
-                claim_id=claim_id,
-                result_type='reports',
-                result_data=json.dumps(report_result)
-            )
-            db.session.add(claim_result)
-            db.session.commit()
+            firestore_service.add_claim_result(claim_id, 'reports', report_result)
             
             # Step 6: Comprehensive Checklists and Validation
             socketio.emit('progress', {
@@ -363,18 +339,11 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
             }, room=session_id)
             
             payer_requirements = analyzed_data.get('approval', {}).get('payer_requirements', {})
-            include_payer_checklist_flag = getattr(claim, '_include_payer_checklist', True)
             line_item_result = checker.check_line_items(line_items, analyzed_data, payer_requirements, include_payer_checklist_flag)
-            claim_result = ClaimResult(
-                claim_id=claim_id,
-                result_type='line_items',
-                result_data=json.dumps(line_item_result)
-            )
-            db.session.add(claim_result)
-            db.session.commit()
+            firestore_service.add_claim_result(claim_id, 'comprehensive_checklist', line_item_result)
             
             # Step 7: Tariff Check (optional)
-            if claim.hospital_id and claim.payer_id:
+            if claim.get('hospital_id') and claim.get('payer_id'):
                 socketio.emit('progress', {
                     'step': 'tariff_check',
                     'message': 'Checking against tariff database...',
@@ -383,16 +352,10 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
                 
                 tariff_result = checker.check_tariffs(
                     line_items,
-                    claim.hospital_id,
-                    claim.payer_id
+                    claim['hospital_id'],
+                    claim['payer_id']
                 )
-                claim_result = ClaimResult(
-                    claim_id=claim_id,
-                    result_type='tariffs',
-                    result_data=json.dumps(tariff_result)
-                )
-                db.session.add(claim_result)
-                db.session.commit()
+                firestore_service.add_claim_result(claim_id, 'tariffs', tariff_result)
             
             # Step 8: Calculate Final Score
             socketio.emit('progress', {
@@ -402,11 +365,8 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
             }, room=session_id)
             
             all_results = [patient_result, date_result, report_result, line_item_result]
-            if claim.hospital_id and claim.payer_id:
+            if tariff_result is not None:
                 all_results.append(tariff_result)
-            
-            # Get ignore_discrepancies flag from claim metadata
-            ignore_discrepancies_flag = getattr(claim, '_ignore_discrepancies', False)
             
             final_score = checker.calculate_accuracy_score(all_results, ignore_discrepancies_flag)
             
@@ -445,21 +405,24 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
                 'discharge_advice': discharge_advice or 'N/A'
             }
             
-            # Update claim
-            claim.accuracy_score = final_score['accuracy_score']
-            claim.passed = final_score['passed']
-            claim.status = 'completed'
-            claim.completed_at = datetime.now(datetime.UTC)
-            db.session.commit()
+            firestore_service.update_claim(claim_id, {
+                'accuracy_score': final_score['accuracy_score'],
+                'passed': final_score['passed'],
+                'status': 'completed',
+                'completed_at': datetime.now(datetime.UTC).isoformat()
+            })
             
             # Save final result
-            claim_result = ClaimResult(
-                claim_id=claim_id,
-                result_type='final_score',
-                result_data=json.dumps(final_score)
-            )
-            db.session.add(claim_result)
-            db.session.commit()
+            firestore_service.add_claim_result(claim_id, 'final_score', final_score)
+
+            # Delete uploaded files after processing
+            for doc_info in documents_data.values():
+                file_path = doc_info.get('file_path')
+                if file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass
             
             socketio.emit('progress', {
                 'step': 'completed',
@@ -473,10 +436,15 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
             'message': f'Error processing claim: {str(e)}'
         }, room=session_id)
         with app.app_context():
-            claim = Claim.query.get(claim_id)
-            if claim:
-                claim.status = 'failed'
-                db.session.commit()
+            if firestore_service.get_claim(claim_id):
+                firestore_service.update_claim(claim_id, {'status': 'failed'})
+            for doc_info in documents_data.values():
+                file_path = doc_info.get('file_path')
+                if file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass
 
 @app.route('/api/claims/process', methods=['POST'])
 def process_claim():
@@ -500,24 +468,22 @@ def process_claim():
     
     # Create claim
     claim_number = f"CLM-{uuid.uuid4().hex[:8].upper()}"
-    claim = Claim(
-        user_id=None,  # No authentication needed
-        claim_number=claim_number,
-        hospital_id=hospital_id if (enable_tariff_check and hospital_id) else None,
-        payer_id=payer_id if (enable_tariff_check and payer_id) else None,
-        status='processing'
-    )
-    # Store flags for async processing
-    claim._ignore_discrepancies = ignore_discrepancies
-    claim._include_payer_checklist = include_payer_checklist
-    db.session.add(claim)
-    db.session.commit()
+    claim_payload = {
+        'user_id': getattr(request, 'api_user_id', None),
+        'claim_number': claim_number,
+        'hospital_id': hospital_id if (enable_tariff_check and hospital_id) else None,
+        'payer_id': payer_id if (enable_tariff_check and payer_id) else None,
+        'ignore_discrepancies': ignore_discrepancies,
+        'include_payer_checklist': include_payer_checklist,
+        'status': 'processing'
+    }
+    claim_id = firestore_service.create_claim(claim_payload)
     
     # Save uploaded files - assign generic names
     documents_data = {}
     for idx, file in enumerate(files):
         if file and file.filename and allowed_file(file.filename):
-            filename = secure_filename(f"{claim.id}_doc_{idx+1}_{file.filename}")
+            filename = secure_filename(f"{claim_id}_doc_{idx+1}_{file.filename}")
             file_path = os.path.join(Config.UPLOAD_FOLDER, filename)
             file.save(file_path)
             
@@ -535,87 +501,71 @@ def process_claim():
     # Process in background
     thread = threading.Thread(
         target=process_claim_async,
-        args=(claim.id, documents_data, session_id, ignore_discrepancies, include_payer_checklist)
+        args=(claim_id, documents_data, session_id, ignore_discrepancies, include_payer_checklist)
     )
     thread.daemon = True
     thread.start()
     
     return jsonify({
-        'claim_id': claim.id,
+        'claim_id': claim_id,
         'claim_number': claim_number,
         'session_id': session_id,
         'message': 'Claim processing started',
         'status': 'processing'
     }), 202
 
-@app.route('/api/claims/<int:claim_id>', methods=['GET'])
+@app.route('/api/claims/<claim_id>', methods=['GET'])
 def get_claim(claim_id):
     """Get claim results"""
-    claim = Claim.query.get_or_404(claim_id)
-    
-    results = ClaimResult.query.filter_by(claim_id=claim_id).all()
-    results_data = {}
-    for result in results:
-        results_data[result.result_type] = json.loads(result.result_data)
-    
+    claim = firestore_service.get_claim(claim_id)
+    if not claim:
+        return jsonify({'error': 'Claim not found'}), 404
+
+    results = firestore_service.get_claim_results(claim_id)
+
     return jsonify({
-        'claim_id': claim.id,
-        'claim_number': claim.claim_number,
-        'status': claim.status,
-        'accuracy_score': claim.accuracy_score,
-        'passed': claim.passed,
-        'created_at': claim.created_at.isoformat(),
-        'completed_at': claim.completed_at.isoformat() if claim.completed_at else None,
-        'results': results_data
+        'claim_id': claim.get('id'),
+        'claim_number': claim.get('claim_number'),
+        'status': claim.get('status'),
+        'accuracy_score': claim.get('accuracy_score'),
+        'passed': claim.get('passed'),
+        'created_at': claim.get('created_at'),
+        'completed_at': claim.get('completed_at'),
+        'results': results
     })
 
 @app.route('/api/claims', methods=['GET'])
 def list_claims():
     """List all claims"""
-    claims = Claim.query.order_by(Claim.created_at.desc()).limit(50).all()
-    
+    claims = firestore_service.list_claims()
+
     return jsonify({
         'claims': [{
-            'id': claim.id,
-            'claim_number': claim.claim_number,
-            'status': claim.status,
-            'accuracy_score': claim.accuracy_score,
-            'passed': claim.passed,
-            'created_at': claim.created_at.isoformat()
+            'id': claim.get('id'),
+            'claim_number': claim.get('claim_number'),
+            'status': claim.get('status'),
+            'accuracy_score': claim.get('accuracy_score'),
+            'passed': claim.get('passed'),
+            'created_at': claim.get('created_at')
         } for claim in claims]
     })
 
 # Tariff Management (for future use)
 @app.route('/api/tariffs', methods=['POST'])
+@require_api_key
 def create_tariff():
     """Create tariff entry"""
     data = request.json
-    tariff = Tariff(
-        hospital_id=data['hospital_id'],
-        payer_id=data['payer_id'],
-        item_code=data['item_code'],
-        item_name=data['item_name'],
-        price=data['price'],
-        effective_from=datetime.fromisoformat(data['effective_from']).date()
-    )
-    db.session.add(tariff)
-    db.session.commit()
-    return jsonify({'message': 'Tariff created', 'id': tariff.id}), 201
+    tariff_id = firestore_service.create_tariff({
+        'hospital_id': data['hospital_id'],
+        'payer_id': data['payer_id'],
+        'item_code': data['item_code'],
+        'item_name': data['item_name'],
+        'price': data['price'],
+        'effective_from': data['effective_from']
+    })
+    return jsonify({'message': 'Tariff created', 'id': tariff_id}), 201
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-        # Create default admin user if not exists
-        if not User.query.filter_by(username='admin').first():
-            admin = User(
-                username='admin',
-                email='admin@example.com',
-                password_hash=generate_password_hash('admin123'),
-                is_admin=True
-            )
-            db.session.add(admin)
-            db.session.commit()
-            print("Default admin user created: admin/admin123")
-    
     socketio.run(app, host=Config.HOST, port=Config.PORT, debug=True)
 

@@ -52,8 +52,10 @@ FLASK_APP=app.py
 FLASK_ENV=development
 SECRET_KEY=your-secret-key-here-change-in-production
 
-# Database Configuration
-DATABASE_URL=sqlite:///health_claims.db
+# Firestore Configuration
+FIRESTORE_PROJECT_ID=ants-admin-9e443
+# Provide the service account JSON as a single-line string (or base64 encoded)
+FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
 
 # Gemini API Configuration
 GEMINI_API_KEY=AIzaSyByAi1ZvqcRKMhPplDHQnlOQdN0lgMgtVE
@@ -63,8 +65,13 @@ GEMINI_MODEL=gemini-2.0-flash-lite
 HOST=0.0.0.0
 PORT=5000
 ```
+- Generate a compact JSON string with: `cat service-account.json | jq -c .`
+- Keep the service account secret and never commit it to source control.
 
-**Note:** The Gemini API key and model are pre-configured in `config.py`. You can override them by creating a `.env` file with your own values.
+4. **Get Gemini API Key**
+- Visit [Google AI Studio](https://makersuite.google.com/app/apikey)
+- Create a new API key
+- Add it to your `.env` file
 
 5. **Initialize the database**
 The database will be created automatically on first run. A default admin user will be created:
@@ -80,6 +87,8 @@ python app.py
 The application will be available at:
 - Frontend: http://localhost:5000
 - API: http://localhost:5000/api
+
+Uploaded documents are processed temporarily and deleted once the analysis completes; only structured results are stored in Firestore.
 
 ## Docker Deployment
 
