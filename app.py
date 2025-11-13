@@ -12,7 +12,7 @@ import json
 import uuid
 import hashlib
 import secrets
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from functools import wraps
 import threading
 
@@ -36,6 +36,25 @@ os.makedirs('static', exist_ok=True)
 doc_processor = DocumentProcessor()
 quality_checker = None
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _read_frontend_asset(relative_path: str) -> str:
+    try:
+        with open(os.path.join(BASE_DIR, relative_path), 'r', encoding='utf-8') as asset_file:
+            return asset_file.read()
+    except FileNotFoundError:
+        return ''
+
+
+def get_frontend_assets() -> dict:
+    """Return current frontend assets for external API consumers."""
+    return {
+        'html': _read_frontend_asset(os.path.join('static', 'index.html')),
+        'css': _read_frontend_asset(os.path.join('static', 'styles.css')),
+        'js': _read_frontend_asset(os.path.join('static', 'app.js'))
+    }
+
 
 def get_quality_checker():
     """Get or create quality checker instance"""
@@ -53,6 +72,15 @@ def generate_api_token() -> str:
     return f"hc_{secrets.token_urlsafe(32)}"
 
 
+def authenticate_user_credentials(username: str, password: str):
+    if not username or not password:
+        return None
+    user = firestore_service.get_user_by_username(username)
+    if not user or not check_password_hash(user.get('password_hash', ''), password):
+        return None
+    return user
+
+
 # API Key Authentication Decorator
 def require_api_key(f):
     @wraps(f)
@@ -65,6 +93,18 @@ def require_api_key(f):
         api_key_doc = firestore_service.find_api_key_by_hash(key_hash)
         if not api_key_doc:
             return jsonify({'error': 'Invalid or inactive API key'}), 401
+
+        rate_limit = api_key_doc.get('rate_limit_per_hour', Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR)
+        allowed = firestore_service.record_api_key_usage(api_key_doc['id'], rate_limit)
+        if not allowed:
+            now = datetime.now(timezone.utc)
+            next_reset = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+            retry_after = max(1, int((next_reset - now).total_seconds()))
+            return jsonify({
+                'error': 'Rate limit exceeded for API key',
+                'rate_limit_per_hour': rate_limit,
+                'retry_after_seconds': retry_after
+            }), 429
 
         firestore_service.update_api_key_last_used(api_key_doc['id'])
         request.api_user_id = api_key_doc.get('user_id')
@@ -176,7 +216,8 @@ def list_api_keys():
             'key_prefix': key.get('key_prefix'),
             'is_active': key.get('is_active'),
             'created_at': key.get('created_at'),
-            'last_used': key.get('last_used')
+            'last_used': key.get('last_used'),
+            'rate_limit_per_hour': key.get('rate_limit_per_hour', Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR)
         } for key in api_keys]
     })
 
@@ -187,6 +228,7 @@ def create_api_key():
     data = request.json
     user_id = data.get('user_id') or getattr(request, 'api_user_id', None)
     name = data.get('name', 'Default API Key')
+    rate_limit_per_hour = data.get('rate_limit_per_hour')
 
     if not user_id:
         return jsonify({'error': 'user_id required'}), 400
@@ -194,16 +236,22 @@ def create_api_key():
     if not firestore_service.get_user(user_id):
         return jsonify({'error': 'User not found'}), 404
 
+    try:
+        rate_limit_per_hour = int(rate_limit_per_hour) if rate_limit_per_hour is not None else Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR
+    except (TypeError, ValueError):
+        return jsonify({'error': 'rate_limit_per_hour must be an integer'}), 400
+
     api_key_token = generate_api_token()
     key_hash = hash_api_key(api_key_token)
     key_prefix = api_key_token[:8]
-    key_id = firestore_service.create_api_key(user_id, key_hash, key_prefix, name)
+    key_id = firestore_service.create_api_key(user_id, key_hash, key_prefix, name, rate_limit_per_hour)
 
     return jsonify({
         'message': 'API key created successfully',
         'api_key': api_key_token,
         'key_prefix': key_prefix,
         'id': key_id,
+        'rate_limit_per_hour': rate_limit_per_hour,
         'warning': 'Save this API key securely. It will not be shown again.'
     }), 201
 
@@ -213,6 +261,91 @@ def create_api_key():
 def delete_api_key(key_id):
     firestore_service.deactivate_api_key(key_id)
     return jsonify({'message': 'API key deactivated'})
+
+
+@app.route('/api/api-keys/manage', methods=['POST'])
+def manage_api_keys():
+    data = request.json or {}
+    action = (data.get('action') or '').strip().lower()
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+
+    if not action or not username or not password:
+        return jsonify({'error': 'action, username, and password are required'}), 400
+
+    user = authenticate_user_credentials(username, password)
+    if not user:
+        return jsonify({'error': 'Invalid credentials'}), 401
+
+    user_id = user['id']
+
+    if action == 'list':
+        api_keys = firestore_service.list_api_keys(user_id)
+        return jsonify({
+            'user_id': user_id,
+            'api_keys': [{
+                'id': key['id'],
+                'name': key.get('name'),
+                'key_prefix': key.get('key_prefix'),
+                'is_active': key.get('is_active'),
+                'created_at': key.get('created_at'),
+                'last_used': key.get('last_used'),
+                'rate_limit_per_hour': key.get('rate_limit_per_hour', Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR)
+            } for key in api_keys]
+        })
+
+    if action == 'create':
+        name = data.get('name', 'Default API Key')
+        rate_limit = data.get('rate_limit_per_hour', Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR)
+        try:
+            rate_limit = int(rate_limit)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'rate_limit_per_hour must be an integer'}), 400
+
+        api_key_token = generate_api_token()
+        key_hash = hash_api_key(api_key_token)
+        key_prefix = api_key_token[:8]
+        key_id = firestore_service.create_api_key(user_id, key_hash, key_prefix, name, rate_limit)
+        return jsonify({
+            'message': 'API key created successfully',
+            'api_key': api_key_token,
+            'key_prefix': key_prefix,
+            'id': key_id,
+            'rate_limit_per_hour': rate_limit,
+            'warning': 'Save this API key securely. It will not be shown again.'
+        }), 201
+
+    if action == 'update':
+        key_id = data.get('key_id')
+        if not key_id:
+            return jsonify({'error': 'key_id is required'}), 400
+        key_doc = firestore_service.get_api_key(key_id)
+        if not key_doc or key_doc.get('user_id') != user_id:
+            return jsonify({'error': 'API key not found'}), 404
+        updates = {}
+        if 'rate_limit_per_hour' in data and data['rate_limit_per_hour'] is not None:
+            try:
+                updates['rate_limit_per_hour'] = int(data['rate_limit_per_hour'])
+            except (TypeError, ValueError):
+                return jsonify({'error': 'rate_limit_per_hour must be an integer'}), 400
+        if 'is_active' in data and data['is_active'] is not None:
+            updates['is_active'] = bool(data['is_active'])
+        if not updates:
+            return jsonify({'error': 'No updates provided'}), 400
+        firestore_service.update_api_key(key_id, updates)
+        return jsonify({'message': 'API key updated', **updates})
+
+    if action == 'deactivate':
+        key_id = data.get('key_id')
+        if not key_id:
+            return jsonify({'error': 'key_id is required'}), 400
+        key_doc = firestore_service.get_api_key(key_id)
+        if not key_doc or key_doc.get('user_id') != user_id:
+            return jsonify({'error': 'API key not found'}), 404
+        firestore_service.deactivate_api_key(key_id)
+        return jsonify({'message': 'API key deactivated'})
+
+    return jsonify({'error': 'Unsupported action'}), 400
 
 
 def process_claim_async(claim_id, documents_data, session_id, ignore_discrepancies=False, include_payer_checklist=True):
@@ -295,6 +428,53 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
                 'progress': 40
             }, room=session_id)
             
+            # Evaluate cashless status before continuing
+            cashless_status = checker.evaluate_cashless_status(analyzed_data)
+            firestore_service.add_claim_result(claim_id, 'cashless_verification', cashless_status)
+            
+            if not cashless_status.get('is_cashless'):
+                invalid_report = {
+                    'version': '2025.11.13',
+                    'metadata': {
+                        'generated_at': datetime.now(timezone.utc).isoformat(),
+                        'include_payer_checklist': include_payer_checklist_flag,
+                        'tariff_check_executed': False
+                    },
+                    'cashless_verification': cashless_status,
+                    'overall_score': {
+                        'score': 0.0,
+                        'passed': False,
+                        'status': 'INVALID',
+                        'reason': cashless_status.get('reason')
+                    },
+                    'message': 'Invalid document: not a cashless health claim.',
+                    'frontend_assets': get_frontend_assets()
+                }
+                
+                firestore_service.update_claim(claim_id, {
+                    'accuracy_score': 0.0,
+                    'passed': False,
+                    'status': 'invalid_document',
+                    'completed_at': datetime.now(timezone.utc).isoformat()
+                })
+                firestore_service.add_claim_result(claim_id, 'final_report', invalid_report)
+                
+                socketio.emit('progress', {
+                    'step': 'error',
+                    'message': 'Invalid document: no final/discharge approval from payer.',
+                    'progress': 100,
+                    'result': invalid_report
+                }, room=session_id)
+                
+                for doc_info in documents_data.values():
+                    file_path = doc_info.get('file_path')
+                    if file_path and os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                        except OSError:
+                            pass
+                return
+            
             # Check patient details across ALL documents
             patient_result = checker.check_patient_details(analyzed_data)
             firestore_service.add_claim_result(claim_id, 'patient_details', patient_result)
@@ -370,50 +550,30 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
             
             final_score = checker.calculate_accuracy_score(all_results, ignore_discrepancies_flag)
             
-            # Extract key information for simplified display from all documents
-            # Try to get discharge summary from various locations
-            discharge_summary = {}
-            for doc_key in ['hospital', 'discharge_summary', 'document_1', 'document_2', 'document_3']:
-                if analyzed_data.get(doc_key, {}).get('discharge_summary'):
-                    discharge_summary = analyzed_data[doc_key]['discharge_summary']
-                    break
-                elif 'discharge' in str(analyzed_data.get(doc_key, {})).lower():
-                    discharge_summary = analyzed_data.get(doc_key, {})
-                    break
-            
-            # Get patient name from various sources
-            patient_name = 'N/A'
-            for doc_key in ['hospital', 'insurer', 'approval']:
-                patient_details = analyzed_data.get(doc_key, {}).get('patient_details', {})
-                if patient_details and patient_details.get('patient_name'):
-                    patient_name = patient_details['patient_name']
-                    break
-            
-            # Get treatment and diagnosis info
-            line_of_treatment = discharge_summary.get('treatment_given', []) or discharge_summary.get('procedures_performed', []) or []
-            diagnosis = discharge_summary.get('diagnosis', []) or []
-            procedures = discharge_summary.get('procedures_performed', []) or []
-            discharge_advice = discharge_summary.get('discharge_advice', '') or analyzed_data.get('hospital', {}).get('discharge_advice', '')
-            
-            final_score['summary_info'] = {
-                'patient_name': patient_name,
-                'admission_date': discharge_summary.get('admission_date', 'N/A'),
-                'discharge_date': discharge_summary.get('discharge_date', 'N/A'),
-                'line_of_treatment': line_of_treatment if isinstance(line_of_treatment, list) else [line_of_treatment] if line_of_treatment else [],
-                'diagnosis': diagnosis if isinstance(diagnosis, list) else [diagnosis] if diagnosis else [],
-                'procedures': procedures if isinstance(procedures, list) else [procedures] if procedures else [],
-                'discharge_advice': discharge_advice or 'N/A'
-            }
+            final_report = checker.build_final_report(
+                analyzed_data,
+                cashless_status,
+                patient_result,
+                date_result,
+                report_result,
+                line_item_result,
+                tariff_result,
+                final_score,
+                include_payer_checklist_flag,
+                ignore_discrepancies_flag
+            )
+            final_report['frontend_assets'] = get_frontend_assets()
             
             firestore_service.update_claim(claim_id, {
                 'accuracy_score': final_score['accuracy_score'],
                 'passed': final_score['passed'],
                 'status': 'completed',
-                'completed_at': datetime.now(datetime.UTC).isoformat()
+                'completed_at': datetime.now(timezone.utc).isoformat()
             })
             
             # Save final result
             firestore_service.add_claim_result(claim_id, 'final_score', final_score)
+            firestore_service.add_claim_result(claim_id, 'final_report', final_report)
 
             # Delete uploaded files after processing
             for doc_info in documents_data.values():
@@ -428,7 +588,7 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
                 'step': 'completed',
                 'message': f"Processing complete! Accuracy: {final_score['accuracy_score']}% - {'PASSED' if final_score['passed'] else 'FAILED'}",
                 'progress': 100,
-                'result': final_score
+                'result': final_report
             }, room=session_id)
             
     except Exception as e:
@@ -452,9 +612,37 @@ def process_claim():
     if 'documents' not in request.files:
         return jsonify({'error': 'No documents provided'}), 400
     
-    client_ip = get_client_ip()
-    if not record_daily_request(client_ip):
-        return jsonify({'error': 'Rate limit exceeded. Only one claim processing request is allowed per day from this IP address.'}), 429
+    internal_request = request.headers.get('X-Internal-Client') == 'web'
+    api_key_value = request.headers.get('X-API-Key') or request.args.get('api_key')
+    api_user_id = None
+    api_key_id = None
+
+    if api_key_value:
+        key_hash = hash_api_key(api_key_value)
+        api_key_doc = firestore_service.find_api_key_by_hash(key_hash)
+        if not api_key_doc:
+            return jsonify({'error': 'Invalid or inactive API key'}), 401
+        rate_limit = api_key_doc.get('rate_limit_per_hour', Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR)
+        allowed = firestore_service.record_api_key_usage(api_key_doc['id'], rate_limit)
+        if not allowed:
+            now = datetime.now(timezone.utc)
+            next_reset = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+            retry_after = max(1, int((next_reset - now).total_seconds()))
+            return jsonify({
+                'error': 'Rate limit exceeded for API key',
+                'rate_limit_per_hour': rate_limit,
+                'retry_after_seconds': retry_after
+            }), 429
+        firestore_service.update_api_key_last_used(api_key_doc['id'])
+        api_user_id = api_key_doc.get('user_id')
+        api_key_id = api_key_doc.get('id')
+    elif not internal_request:
+        client_ip = get_client_ip()
+        if not record_daily_request(client_ip):
+            limit = Config.UNAUTHENTICATED_DAILY_LIMIT
+            return jsonify({
+                'error': f'Rate limit exceeded. Only {limit} claim processing request{"s" if limit != 1 else ""} per day are allowed from this IP address.'
+            }), 429
     
     files = request.files.getlist('documents')
     hospital_id = request.form.get('hospital_id', '').strip()
@@ -469,13 +657,15 @@ def process_claim():
     # Create claim
     claim_number = f"CLM-{uuid.uuid4().hex[:8].upper()}"
     claim_payload = {
-        'user_id': getattr(request, 'api_user_id', None),
+        'user_id': api_user_id,
+        'api_key_id': api_key_id,
         'claim_number': claim_number,
         'hospital_id': hospital_id if (enable_tariff_check and hospital_id) else None,
         'payer_id': payer_id if (enable_tariff_check and payer_id) else None,
         'ignore_discrepancies': ignore_discrepancies,
         'include_payer_checklist': include_payer_checklist,
-        'status': 'processing'
+        'status': 'processing',
+        'request_source': 'internal' if internal_request else ('api_key' if api_key_value else 'external_public')
     }
     claim_id = firestore_service.create_claim(claim_payload)
     
@@ -522,6 +712,10 @@ def get_claim(claim_id):
         return jsonify({'error': 'Claim not found'}), 404
 
     results = firestore_service.get_claim_results(claim_id)
+
+    final_report = results.get('final_report')
+    if isinstance(final_report, dict) and 'frontend_assets' not in final_report:
+        final_report['frontend_assets'] = get_frontend_assets()
 
     return jsonify({
         'claim_id': claim.get('id'),

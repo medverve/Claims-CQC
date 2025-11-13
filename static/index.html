@@ -27,6 +27,9 @@
                     <button class="nav-btn" data-page="claims">
                         <span>📋</span> Claims History
                     </button>
+                    <button class="nav-btn" data-page="api-keys">
+                        <span>🔑</span> API Keys
+                    </button>
                 </div>
             </div>
             <div class="sidebar-footer">
@@ -136,6 +139,49 @@
                 </div>
                 <div class="claims-container">
                     <div id="claims-list"></div>
+                </div>
+            </div>
+
+            <!-- API Keys Page -->
+            <div id="api-keys-page" class="page">
+                <div class="page-header">
+                    <h1>API Key Management</h1>
+                </div>
+                <div class="api-keys-wrapper">
+                    <div class="api-key-card">
+                        <h3>Authenticate</h3>
+                        <p class="muted">Use an existing account to manage API keys. Credentials are used only for this request.</p>
+                        <form id="api-key-login-form">
+                            <div class="form-row">
+                                <label for="api-key-username">Username</label>
+                                <input type="text" id="api-key-username" placeholder="Enter username" required>
+                            </div>
+                            <div class="form-row">
+                                <label for="api-key-password">Password</label>
+                                <input type="password" id="api-key-password" placeholder="Enter password" required>
+                            </div>
+                            <button type="submit" class="btn-primary">Sign In</button>
+                            <p id="api-key-login-error" class="form-error"></p>
+                        </form>
+                    </div>
+
+                    <div id="api-key-manager-content" class="api-key-card hidden">
+                        <h3>Create API Key</h3>
+                        <form id="api-key-create-form" class="form-inline">
+                            <div class="form-row">
+                                <label for="api-key-name">Name</label>
+                                <input type="text" id="api-key-name" placeholder="Marketing App Key">
+                            </div>
+                            <div class="form-row">
+                                <label for="api-key-rate-limit">Requests per hour</label>
+                                <input type="number" id="api-key-rate-limit" placeholder="60" min="1">
+                            </div>
+                            <button type="submit" class="btn-primary">Generate Key</button>
+                        </form>
+                        <p id="new-api-key-alert" class="api-key-alert"></p>
+                        <p id="api-key-manager-message" class="muted"></p>
+                        <div id="api-keys-table"></div>
+                    </div>
                 </div>
             </div>
         </div>

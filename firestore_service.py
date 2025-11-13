@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional, Dict, Any, List
 
 from google.cloud import firestore
@@ -15,7 +15,11 @@ class FirestoreService:
         if service_account_json:
             info = json.loads(service_account_json)
             credentials = service_account.Credentials.from_service_account_info(info)
-        self.client = firestore.Client(project=Config.FIRESTORE_PROJECT_ID, credentials=credentials)
+        self.client = firestore.Client(
+            project=Config.FIRESTORE_PROJECT_ID,
+            database=Config.FIRESTORE_DATABASE_ID,
+            credentials=credentials
+        )
 
     # ---------------------- Users ----------------------
     def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
@@ -41,7 +45,7 @@ class FirestoreService:
             'email': email,
             'password_hash': password_hash,
             'is_admin': is_admin,
-            'created_at': datetime.now(datetime.UTC).isoformat()
+            'created_at': datetime.now(timezone.utc).isoformat()
         })
         return doc_ref.id
 
@@ -56,7 +60,9 @@ class FirestoreService:
         return None
 
     # ---------------------- API Keys ----------------------
-    def create_api_key(self, user_id: str, key_hash: str, key_prefix: str, name: str) -> str:
+    def create_api_key(self, user_id: str, key_hash: str, key_prefix: str, name: str, rate_limit_per_hour: Optional[int] = None) -> str:
+        if rate_limit_per_hour is None or rate_limit_per_hour <= 0:
+            rate_limit_per_hour = Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR
         doc_ref = self.client.collection('api_keys').document()
         doc_ref.set({
             'user_id': user_id,
@@ -64,8 +70,9 @@ class FirestoreService:
             'key_prefix': key_prefix,
             'name': name,
             'is_active': True,
-            'created_at': datetime.now(datetime.UTC).isoformat(),
-            'last_used': None
+            'created_at': datetime.now(timezone.utc).isoformat(),
+            'last_used': None,
+            'rate_limit_per_hour': rate_limit_per_hour
         })
         return doc_ref.id
 
@@ -75,6 +82,9 @@ class FirestoreService:
         for doc in docs:
             data = doc.to_dict()
             data['id'] = doc.id
+            if 'rate_limit_per_hour' not in data and 'requests_per_hour' in data:
+                data['rate_limit_per_hour'] = data['requests_per_hour']
+            data.setdefault('rate_limit_per_hour', Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR)
             keys.append(data)
         return keys
 
@@ -82,23 +92,69 @@ class FirestoreService:
         doc_ref = self.client.collection('api_keys').document(key_id)
         doc_ref.update({'is_active': False})
 
+    def update_api_key(self, key_id: str, updates: Dict[str, Any]) -> None:
+        updates = {**updates, 'updated_at': datetime.now(timezone.utc).isoformat()}
+        self.client.collection('api_keys').document(key_id).update(updates)
+
+    def get_api_key(self, key_id: str) -> Optional[Dict[str, Any]]:
+        doc = self.client.collection('api_keys').document(key_id).get()
+        if doc.exists:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            if 'rate_limit_per_hour' not in data and 'requests_per_hour' in data:
+                data['rate_limit_per_hour'] = data['requests_per_hour']
+            data.setdefault('rate_limit_per_hour', Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR)
+            return data
+        return None
+
     def find_api_key_by_hash(self, key_hash: str) -> Optional[Dict[str, Any]]:
         docs = self.client.collection('api_keys').where('key_hash', '==', key_hash).where('is_active', '==', True).limit(1).stream()
         for doc in docs:
             data = doc.to_dict()
             data['id'] = doc.id
+            if 'rate_limit_per_hour' not in data and 'requests_per_hour' in data:
+                data['rate_limit_per_hour'] = data['requests_per_hour']
+            data.setdefault('rate_limit_per_hour', Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR)
             return data
         return None
 
     def update_api_key_last_used(self, key_id: str) -> None:
         doc_ref = self.client.collection('api_keys').document(key_id)
-        doc_ref.update({'last_used': datetime.now(datetime.UTC).isoformat()})
+        doc_ref.update({'last_used': datetime.now(timezone.utc).isoformat()})
+
+    def record_api_key_usage(self, key_id: str, max_requests_per_hour: int) -> bool:
+        if max_requests_per_hour is None or max_requests_per_hour <= 0:
+            max_requests_per_hour = Config.DEFAULT_API_KEY_REQUESTS_PER_HOUR
+        hour_slot = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        doc_id = f"{key_id}_{hour_slot.isoformat()}"
+        doc_ref = self.client.collection('api_key_usage').document(doc_id)
+        transaction = self.client.transaction()
+
+        @firestore.transactional
+        def _update(trans):
+            snapshot = doc_ref.get(transaction=trans)
+            current_count = 0
+            if snapshot.exists:
+                data = snapshot.to_dict()
+                current_count = data.get('count', 0)
+                if current_count >= max_requests_per_hour:
+                    return False
+            trans.set(doc_ref, {
+                'key_id': key_id,
+                'hour_slot': hour_slot.isoformat(),
+                'count': current_count + 1,
+                'max_requests': max_requests_per_hour,
+                'updated_at': datetime.now(timezone.utc).isoformat()
+            }, merge=True)
+            return True
+
+        return _update(transaction)
 
     # ---------------------- Claims ----------------------
     def create_claim(self, claim_data: Dict[str, Any]) -> str:
         doc_ref = self.client.collection('claims').document()
         claim_data = {**claim_data}
-        claim_data['created_at'] = datetime.now(datetime.UTC).isoformat()
+        claim_data['created_at'] = datetime.now(timezone.utc).isoformat()
         claim_data.setdefault('status', 'processing')
         claim_data.setdefault('accuracy_score', None)
         claim_data.setdefault('passed', None)
@@ -107,7 +163,7 @@ class FirestoreService:
         return doc_ref.id
 
     def update_claim(self, claim_id: str, updates: Dict[str, Any]) -> None:
-        updates['updated_at'] = datetime.now(datetime.UTC).isoformat()
+        updates['updated_at'] = datetime.now(timezone.utc).isoformat()
         self.client.collection('claims').document(claim_id).update(updates)
 
     def get_claim(self, claim_id: str) -> Optional[Dict[str, Any]]:
@@ -133,7 +189,7 @@ class FirestoreService:
         result_data = {
             'result_type': result_type,
             'result_data': result_data,
-            'created_at': datetime.now(datetime.UTC).isoformat()
+            'created_at': datetime.now(timezone.utc).isoformat()
         }
         doc_ref.set(result_data)
         return doc_ref.id
@@ -149,7 +205,7 @@ class FirestoreService:
     # ---------------------- Tariffs ----------------------
     def create_tariff(self, tariff_data: Dict[str, Any]) -> str:
         doc_ref = self.client.collection('tariffs').document()
-        tariff_data['created_at'] = datetime.now(datetime.UTC).isoformat()
+        tariff_data['created_at'] = datetime.now(timezone.utc).isoformat()
         doc_ref.set(tariff_data)
         return doc_ref.id
 
@@ -163,7 +219,7 @@ class FirestoreService:
         doc_ref.set({
             'ip_address': ip_address,
             'request_date': request_date.isoformat(),
-            'created_at': datetime.now(datetime.UTC).isoformat()
+            'created_at': datetime.now(timezone.utc).isoformat()
         })
         return True
 

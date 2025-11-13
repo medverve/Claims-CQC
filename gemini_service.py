@@ -15,15 +15,21 @@ class GeminiService:
         genai.configure(api_key=api_key)
         # Use gemini-2.0-flash-lite model
         model_name = getattr(Config, 'GEMINI_MODEL', 'gemini-2.0-flash-lite')
-        self.model = genai.GenerativeModel(model_name)
+        self.generation_config = {
+            "temperature": 0.0,
+            "top_p": 0.1,
+            "top_k": 32,
+            "max_output_tokens": 8192
+        }
+        self.model = genai.GenerativeModel(model_name, generation_config=self.generation_config)
         # Keep vision model for image processing if needed
-        self.vision_model = genai.GenerativeModel(model_name)
+        self.vision_model = genai.GenerativeModel(model_name, generation_config=self.generation_config)
     
     def _generate_with_retry(self, prompt, max_retries=3, initial_delay=2):
         """Generate content with retry logic for rate limiting (429 errors)"""
         for attempt in range(max_retries):
             try:
-                response = self.model.generate_content(prompt)
+                response = self.model.generate_content(prompt, generation_config=self.generation_config)
                 return response
             except Exception as e:
                 error_str = str(e)
@@ -45,105 +51,172 @@ class GeminiService:
     
     def analyze_document(self, text: str, document_type: str = "health_claim") -> Dict[str, Any]:
         """Analyze document text using Gemini"""
-        prompt = f"""You are a healthcare claims processing expert. Analyze this health claim document COMPLETELY and extract ALL relevant information with PROPER NORMALIZATION.
+        prompt = f"""You are a healthcare claims adjudication analyst. Extract every fact needed for cashless health claim validation from the document text.
 
-CRITICAL: You must return ONLY valid JSON. No explanations, no markdown, just pure JSON.
+STRICT OUTPUT RULES:
+- Return ONLY valid JSON (UTF-8, minified or pretty). No markdown, commentary, or trailing text.
+- Use null when information is not present. Do not invent values.
+- Normalize names (proper casing), trim whitespace, and convert all monetary values to floating point numbers.
+- Convert every date to ISO format YYYY-MM-DD where possible. If the year is missing, use null.
+- Age must be an integer in years when derivable; otherwise use null.
 
-NORMALIZE ALL FIELD NAMES: Use standard medical terminology. Normalize item names to their standard medical names.
-
-Extract the following information in this EXACT JSON structure:
-
+Output EXACTLY this JSON structure:
 {{
+  "document_descriptor": {{
+    "probable_document_type": "Approval Letter/Discharge Summary/Invoice/Estimate/Referral/ID Card/Clinical Notes/Other",
+    "source_category": "Insurer/TPA/Corporate/Govt Scheme/Hospital/Patient/Other",
+    "confidence": "high/medium/low"
+  }},
+  "cashless_assessment": {{
+    "is_cashless_claim": true/false,
+    "has_final_or_discharge_approval": true/false,
+    "approval_stage": "Final Approval/Discharge Approval/Interim Approval/Pre-Auth/Referral/None",
+    "approving_entity": "name of insurer/TPA/corporate/government",
+    "payer_type": "Insurer/TPA/Corporate/Govt Scheme/Unknown",
+    "payer_name": "normalized payer name",
+    "approval_reference": "authorization number or identifier",
+    "approval_date": "YYYY-MM-DD or null",
+    "evidence_excerpt": "verbatim sentence proving the assessment"
+  }},
+  "payer_details": {{
+    "payer_type": "Insurer/TPA/Corporate/Govt Scheme/Unknown",
+    "payer_name": "normalized payer name",
+    "payer_id": "policy/program identifier if present",
+    "contact_person": "claims officer/contact if present",
+    "contact_phone": "phone number",
+    "contact_email": "email address",
+    "address": "postal address"
+  }},
+  "hospital_details": {{
+    "hospital_name": "normalized hospital name",
+    "hospital_id": "if present",
+    "network_status": "Network/Non-Network/Not Mentioned",
+    "address": "postal address",
+    "city": "city name",
+    "state": "state name",
+    "contact_person": "hospital contact",
+    "contact_phone": "phone number"
+  }},
   "patient_details": {{
-    "patient_name": "extract and normalize full name - handle surname, half names, initials (e.g., 'John M. Smith' = 'John Michael Smith', 'Dr. John' = 'John', 'Smith, John' = 'John Smith')",
-    "patient_id": "policy number or patient ID",
-    "date_of_birth": "DOB in YYYY-MM-DD format",
-    "gender": "Male/Female/Other",
+    "patient_name": "full patient name exactly as shown",
+    "normalized_name": "normalized patient name (expanded initials if possible)",
+    "patient_id": "patient ID or MRN",
+    "policy_number": "policy number or card number",
+    "date_of_birth": "YYYY-MM-DD or null",
+    "age_years": null,
+    "gender": "Male/Female/Other/Unknown",
+    "relation_to_employee": "relationship to primary insured if present",
     "contact_info": {{
       "phone": "phone number",
-      "email": "email",
-      "address": "complete address"
+      "email": "email address",
+      "address": "postal address"
     }}
   }},
+  "patient_id_cards": [
+    {{
+      "card_type": "Insurance Card/Corporate ID/Govt Scheme Card/Other",
+      "id_number": "identifier from the card",
+      "patient_name": "name on card",
+      "age_years": null,
+      "gender": "Male/Female/Other/Unknown",
+      "valid_from": "YYYY-MM-DD or null",
+      "valid_to": "YYYY-MM-DD or null",
+      "notes": "any additional card remarks"
+    }}
+  ],
   "claim_information": {{
-    "claim_number": "claim number",
-    "hospital_name": "hospital or facility name",
-    "payer_name": "insurance company name",
-    "approval_number": "pre-authorization or approval number",
-    "referral_number": "referral number if present",
-    "approval_dates": {{
-      "from": "start date in YYYY-MM-DD format",
-      "to": "end date in YYYY-MM-DD format"
-    }},
-    "approved_procedures": ["list of approved procedures/treatments from approval"],
-    "approved_diagnosis": ["list of approved diagnosis codes"]
-  }},
-  "line_items": [
-    {{
-      "item_code": "CGHS code or procedure code",
-      "item_name": "NORMALIZED standard medical name",
-      "icd11_code": "ICD-11 diagnosis code if present",
-      "cghs_code": "CGHS code if present",
-      "quantity": 0,
-      "units": "unit type",
-      "price_per_unit": 0.0,
-      "total_price": 0.0,
-      "date_of_service": "date in YYYY-MM-DD format",
-      "is_implant": false,
-      "pouch_mentioned": false,
-      "sticker_mentioned": false,
-      "normalized_name": "standardized medical procedure/item name"
+    "claim_number": "claim number if present",
+    "claim_reference_numbers": ["list every variation of claim/reference/authorization number"],
+    "admission_type": "Planned/Emergency/Daycare/Other/Not Mentioned",
+    "treating_doctor": "doctor in charge",
+    "speciality": "doctor speciality or department",
+    "referral_type": "Corporate/TPA/Govt/Other/Not Mentioned",
+    "referral_number": "referral or empanelment number",
+    "line_of_treatment_category": "Medical/Surgical/Intensive Care/Investigative/Non Allopathic/Other/Not Mentioned",
+    "treatment_plan": "narrative treatment plan or summary",
+    "treatment_complexity": "Low/Medium/High/Not Mentioned",
+    "is_package": true/false,
+    "package_name": "package name if applicable",
+    "admission_details": {{
+      "admission_date": "YYYY-MM-DD or null",
+      "discharge_date": "YYYY-MM-DD or null",
+      "length_of_stay_days": null,
+      "ward_type": "General/Semi-Private/Private/ICU/Other/Not Mentioned",
+      "icu_required": true/false
     }}
-  ],
-  "discharge_summary": {{
-    "admission_date": "YYYY-MM-DD",
-    "discharge_date": "YYYY-MM-DD",
-    "diagnosis": ["list of diagnoses"],
-    "procedures_performed": ["list of procedures performed"],
-    "treatment_given": ["list of treatments"],
-    "icd11_codes": ["ICD-11 codes mentioned"],
-    "patient_name": "patient name in discharge summary",
-    "patient_id": "patient ID in discharge summary"
   }},
-  "icp_or_notes": {{
-    "document_type": "ICP/Clinical Notes/Surgery Notes",
-    "date": "YYYY-MM-DD",
-    "procedures_mentioned": ["procedures mentioned"],
-    "diagnosis_mentioned": ["diagnosis mentioned"],
-    "patient_name": "patient name",
-    "patient_id": "patient ID"
+  "clinical_summary": {{
+    "primary_diagnosis": ["diagnosis list"],
+    "secondary_diagnosis": ["secondary diagnosis list"],
+    "procedures_performed": ["procedures actually performed"],
+    "medications": ["important medications"],
+    "presenting_complaints": ["chief complaints"],
+    "investigations": ["key investigations/tests"],
+    "surgery_performed": true/false,
+    "implants_used": true/false
   }},
-  "reports": [
+  "financial_summary": {{
+    "currency": "INR or stated currency",
+    "total_claimed_amount": 0.0,
+    "total_approved_amount": 0.0,
+    "deductible_amount": 0.0,
+    "copay_amount": 0.0,
+    "invoice_number": "invoice/bill number",
+    "invoice_date": "YYYY-MM-DD or null",
+    "approval_amount_breakup": [
+      {{
+        "category": "Room Rent/Pharmacy/Consultation/etc",
+        "approved_amount": 0.0
+      }}
+    ],
+    "line_items": [
+      {{
+        "item_code": "procedure/CGHS code if present",
+        "item_name": "original item name",
+        "normalized_name": "standard medical name",
+        "category": "Room Rent/OT Charges/ICU/Pharmacy/Lab/Implant/Consumable/Professional Fees/Other",
+        "date_of_service": "YYYY-MM-DD or null",
+        "units": 0.0,
+        "unit_price": 0.0,
+        "total_price": 0.0,
+        "requires_proof": true/false,
+        "proof_included": true/false,
+        "proof_accuracy": true/false,
+        "is_implant": true/false,
+        "icd11_code": "ICD-11 code",
+        "cghs_code": "CGHS/Procedure code",
+        "tariff_reference": "tariff or package reference if mentioned",
+        "notes": "any remarks or plan justification"
+      }}
+    ]
+  }},
+  "supporting_documents": {{
+    "discharge_summary_present": true/false,
+    "final_approval_letter_present": true/false,
+    "surgery_notes_present": true/false,
+    "implant_sticker_present": true/false,
+    "implant_vendor_invoice_present": true/false,
+    "implant_pouch_present": true/false,
+    "lab_reports_present": true/false,
+    "radiology_reports_present": true/false,
+    "pharmacy_bills_present": true/false
+  }},
+  "all_dates": ["all detected dates in YYYY-MM-DD where possible"],
+  "all_patient_names": ["every patient name variation observed"],
+  "all_patient_ids": ["every patient/policy/member ID observed"],
+  "raw_references": [
     {{
-      "report_type": "Lab Report/Radiology/Pathology/Surgery Notes/etc",
-      "report_date": "date in YYYY-MM-DD format",
-      "report_number": "report ID or number",
-      "patient_name": "patient name in report",
-      "patient_id": "patient ID in report",
-      "findings": "key findings"
+      "field": "what field this evidence supports",
+      "value": "value captured",
+      "evidence_excerpt": "short quote from document",
+      "page_or_section": "page or section reference if available"
     }}
-  ],
-  "invoice": {{
-    "invoice_date": "date in YYYY-MM-DD format",
-    "invoice_number": "invoice number",
-    "total_amount": 0.0,
-    "cghs_codes": ["all CGHS codes in invoice"]
-  }},
-  "all_dates": ["list all dates found in document in YYYY-MM-DD format"],
-  "all_patient_names": ["all variations of patient name found"],
-  "all_patient_ids": ["all patient ID variations found"]
+  ]
 }}
 
-CRITICAL RULES:
-1. NORMALIZE all item names to standard medical terminology
-2. Extract ALL dates in YYYY-MM-DD format
-3. Extract ICD-11 codes wherever present
-4. Extract CGHS codes from invoice and line items
-5. Extract discharge summary details completely
-6. Extract ICP/Clinical Notes details
-7. Extract patient details from ALL documents (reports, summaries, notes)
-8. If information is not found, use null or empty string
-9. Be extremely thorough - missing information causes claim denial"""
+Document Text:
+{(text or '')[:6000]}
+"""
         
         try:
             full_prompt = f"{prompt}\n\nDocument Text:\n{text[:5000]}"  # Limit text to avoid token limits
@@ -376,42 +449,50 @@ RULES:
     {
       "document_name": "Invoice",
       "presence": true/false,
-      "accurate": true/false
+      "accurate": true/false,
+      "notes": "observations or deficiencies"
     },
     {
       "document_name": "Discharge Summary",
       "presence": true/false,
-      "accurate": true/false
+      "accurate": true/false,
+      "notes": "observations or deficiencies"
     },
     {
       "document_name": "Lab Reports",
       "presence": true/false,
-      "accurate": true/false
+      "accurate": true/false,
+      "notes": "observations or deficiencies"
     },
     {
       "document_name": "Radiology Reports",
       "presence": true/false,
-      "accurate": true/false
+      "accurate": true/false,
+      "notes": "observations or deficiencies"
     },
     {
       "document_name": "Surgery Notes",
       "presence": true/false,
-      "accurate": true/false
+      "accurate": true/false,
+      "notes": "observations or deficiencies"
     },
     {
       "document_name": "ICP/Clinical Notes",
       "presence": true/false,
-      "accurate": true/false
+      "accurate": true/false,
+      "notes": "observations or deficiencies"
     },
     {
       "document_name": "Approval/Authorization",
       "presence": true/false,
-      "accurate": true/false
+      "accurate": true/false,
+      "notes": "observations or deficiencies"
     },
     {
       "document_name": "Implant Certificates",
       "presence": true/false,
-      "accurate": true/false
+      "accurate": true/false,
+      "notes": "observations or deficiencies"
     }
   ]"""
         else:
@@ -438,16 +519,22 @@ Return this EXACT JSON structure:
   "case_specific_checklist": [
     {{
       "item_name": "NORMALIZED standard medical name",
-      "date_of_service": "YYYY-MM-DD",
+      "item_code": "item or procedure code if present",
+      "date_of_service": "YYYY-MM-DD or null",
       "unit_price": 0.0,
-      "units_billed": 0,
-      "proof_required": "Yes/No",
+      "units_billed": 0.0,
+      "total_price": 0.0,
+      "proof_required": true/false,
       "proof_available": true/false,
+      "proof_accuracy": true/false,
       "icd11_code": "ICD-11 code if present",
       "cghs_code": "CGHS code if present",
       "code_valid": true/false,
       "code_match": true/false,
-      "issues": ["list any issues"]
+      "needs_tariff_check": true/false,
+      "issues": ["list any issues"],
+      "severity": "high/medium/low",
+      "notes": "succinct commentary"
     }}
   ],
   "all_discrepancies": [
@@ -499,9 +586,10 @@ CRITICAL REQUIREMENTS:
 4. Verify approval/referral matches treatment given
 5. Verify ICD-11 codes are correct and match diagnosis
 6. Verify CGHS codes are correct and match procedures
-7. Check if proof documents are required and available
-8. List ALL discrepancies that could cause denial
-9. Be extremely thorough - missing checks cause claim failure"""
+7. Check if proof documents are required, available, and accurate
+8. Flag tariff verification requirements and mismatches explicitly
+9. List ALL discrepancies that could cause denial
+10. Be extremely thorough - missing checks cause claim failure"""
         
         try:
             print(f"\n=== PROMPT USED FOR COMPREHENSIVE CHECKLIST GENERATION ===\n{prompt}\n=== END PROMPT ===\n")
@@ -517,3 +605,57 @@ CRITICAL REQUIREMENTS:
             print(f"Error generating checklist: {e}")
             return {"error": str(e), "general_checklist": [], "line_item_checklist": []}
 
+    def generate_predictive_analysis(self, summary_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate predictive payer query analysis with deterministic structure."""
+        serialized_summary = json.dumps(summary_payload, indent=2)
+        if len(serialized_summary) > 6000:
+            serialized_summary = serialized_summary[:6000]
+        
+        prompt = f"""You are a senior health insurance claims auditor. Review the structured claim summary and predict the payer's follow-up queries.
+
+STRICT OUTPUT RULES:
+- Return ONLY valid JSON matching the schema below.
+- Use null where data is unavailable. Keep responses concise and actionable.
+
+Return exactly this JSON structure:
+{{
+  "overall_risk_level": "Low/Medium/High",
+  "confidence": "High/Medium/Low",
+  "possible_queries": [
+    {{
+      "question": "precise query the payer may raise",
+      "trigger": "data point that caused the query",
+      "recommended_response": "succinct guidance to resolve the query"
+    }}
+  ],
+  "focus_areas": [
+    "short bullet describing area needing attention"
+  ],
+  "mitigation_recommendations": [
+    "clear recommended action to pre-empt queries"
+  ],
+  "notes": "additional considerations or follow-up steps"
+}}
+
+STRUCTURED CLAIM SUMMARY:
+{serialized_summary}
+"""
+        try:
+            print(f"\n=== PROMPT USED FOR PREDICTIVE ANALYSIS ===\n{prompt}\n=== END PROMPT ===\n")
+            response = self._generate_with_retry(prompt)
+            response_text = response.text
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+            return json.loads(response_text)
+        except Exception as e:
+            print(f"Error generating predictive analysis: {e}")
+            return {
+                "overall_risk_level": "Medium",
+                "confidence": "Low",
+                "possible_queries": [],
+                "focus_areas": [],
+                "mitigation_recommendations": [],
+                "notes": f"Predictive analysis unavailable: {str(e)}"
+            }

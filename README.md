@@ -54,7 +54,8 @@ SECRET_KEY=your-secret-key-here-change-in-production
 
 # Firestore Configuration
 FIRESTORE_PROJECT_ID=ants-admin-9e443
-# Provide the service account JSON as a single-line string (or base64 encoded)
+FIRESTORE_DATABASE_ID=antsadmin
+# Compact JSON (single-line) service account. Generate with `cat service-account.json | jq -c .`
 FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
 
 # Gemini API Configuration
