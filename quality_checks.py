@@ -406,14 +406,21 @@ class QualityChecker:
         approval_refs = set()
         has_final_approval = False
         cashless_flag = False
+        detected_sources = set()
+        approval_terms = {'approval', 'authorisation', 'authorization', 'sanction', 'clearance', 'cashless', 'referral', 'settlement'}
+        final_terms = {'final', 'discharge', 'settlement', 'clearance'}
         
         for doc_key, doc in documents.items():
             doc = doc or {}
             assessment = doc.get('cashless_assessment') or {}
             if assessment:
                 stage = (assessment.get('approval_stage') or '').lower()
-                has_final_approval = has_final_approval or self._to_bool(assessment.get('has_final_or_discharge_approval')) or any(keyword in stage for keyword in ['final', 'discharge'])
-                cashless_flag = cashless_flag or self._to_bool(assessment.get('is_cashless_claim'))
+                stage_contains_approval = any(term in stage for term in approval_terms if term)
+                stage_contains_final = any(term in stage for term in final_terms if term)
+                if self._to_bool(assessment.get('has_final_or_discharge_approval')) or stage_contains_final:
+                    has_final_approval = True
+                if self._to_bool(assessment.get('is_cashless_claim')) or stage_contains_approval:
+                    cashless_flag = True
                 
                 if not payer_type and assessment.get('payer_type'):
                     payer_type = assessment.get('payer_type')
@@ -436,9 +443,22 @@ class QualityChecker:
                     'is_cashless_claim': self._to_bool(assessment.get('is_cashless_claim')),
                     'evidence_excerpt': assessment.get('evidence_excerpt')
                 })
+                detected_sources.add(doc_key)
         
         for doc in documents.values():
             doc = doc or {}
+            descriptor = (doc.get('document_descriptor') or {})
+            doc_type = (descriptor.get('probable_document_type') or '').lower()
+            if doc_type:
+                if any(term in doc_type for term in approval_terms):
+                    cashless_flag = True
+                    if any(term in doc_type for term in final_terms):
+                        has_final_approval = True
+                    evidence.append({
+                        'document': descriptor.get('probable_document_type'),
+                        'description': 'Document descriptor indicates approval/authorization',
+                        'confidence': descriptor.get('confidence')
+                    })
             hospital_details = doc.get('hospital_details') or {}
             if not hospital_name and hospital_details.get('hospital_name'):
                 hospital_name = hospital_details.get('hospital_name')
@@ -448,11 +468,43 @@ class QualityChecker:
                 payer_type = payer_details.get('payer_type')
             if not payer_name and payer_details.get('payer_name'):
                 payer_name = payer_details.get('payer_name')
+            
+            claim_info = doc.get('claim_information') or {}
+            approval_number = claim_info.get('approval_number') or claim_info.get('referral_number')
+            reference_numbers = claim_info.get('claim_reference_numbers') or []
+            if approval_number:
+                approval_refs.add(approval_number)
+                cashless_flag = True
+            if reference_numbers:
+                approval_refs.update(reference_numbers)
+                cashless_flag = True
+
+            financial_summary = doc.get('financial_summary') or {}
+            approval_breakup = financial_summary.get('approval_amount_breakup') or []
+            total_approved = self._safe_float(financial_summary.get('total_approved_amount'))
+            if approval_breakup or (total_approved is not None and total_approved > 0):
+                cashless_flag = True
+
+            raw_references = doc.get('raw_references') or []
+            for ref in raw_references:
+                value = (ref.get('value') or '').lower()
+                if any(term in value for term in approval_terms):
+                    cashless_flag = True
+                    if any(term in value for term in final_terms):
+                        has_final_approval = True
+                    evidence.append({
+                        'document': ref.get('page_or_section') or 'unknown',
+                        'description': ref.get('field'),
+                        'value': ref.get('value')
+                    })
         
         approval_refs = sorted(ref for ref in approval_refs if ref)
         evidence = sorted(evidence, key=lambda x: x.get('document') or '')
         
-        is_cashless = bool(cashless_flag and has_final_approval)
+        if not has_final_approval and cashless_flag and approval_refs:
+            has_final_approval = True
+
+        is_cashless = bool(cashless_flag or has_final_approval)
         status = 'valid' if is_cashless else 'invalid'
         reason = 'Final/discharge approval letter identified from payer.' if is_cashless else 'Missing final or discharge approval from payer.'
         

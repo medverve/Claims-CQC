@@ -213,8 +213,7 @@ async function handleClaimSubmit(e) {
         const data = await response.json();
         
         if (response.ok || response.status === 202) {
-            // Start polling for results
-            pollClaimResults(data.claim_id);
+            // Realtime updates will arrive via Socket.IO; no further action needed here
         } else {
             alert('Error: ' + data.error);
         }
@@ -253,36 +252,6 @@ function displayResults(result) {
     
     resultsSection.style.display = 'block';
     resultsContent.innerHTML = renderFinalReport(result);
-}
-
-async function pollClaimResults(claimId) {
-    const maxAttempts = 60;
-    let attempts = 0;
-    
-    const poll = async () => {
-        try {
-            const response = await fetch(`/api/claims/${claimId}`);
-            
-            const data = await response.json();
-            
-            if (data.status === 'completed') {
-                displayFullResults(data);
-                return;
-            } else if (data.status === 'failed') {
-                showError('Claim processing failed');
-                return;
-            }
-            
-            attempts++;
-            if (attempts < maxAttempts) {
-                setTimeout(poll, 2000);
-            }
-        } catch (error) {
-            console.error('Polling error:', error);
-        }
-    };
-    
-    poll();
 }
 
 function displayFullResults(claimData) {

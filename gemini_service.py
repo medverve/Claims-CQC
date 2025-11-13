@@ -59,6 +59,9 @@ STRICT OUTPUT RULES:
 - Normalize names (proper casing), trim whitespace, and convert all monetary values to floating point numbers.
 - Convert every date to ISO format YYYY-MM-DD where possible. If the year is missing, use null.
 - Age must be an integer in years when derivable; otherwise use null.
+- Treat all common synonyms consistently: words such as “authorization”, “authorisation”, “approval”, “referral”, “sanction”, “settlement letter”, “clearance”, “cashless letter” must be mapped to the approval-related fields below. Do not skip a document just because the heading uses a different term.
+- Set `cashless_assessment.has_final_or_discharge_approval` to true whenever the document clearly represents the discharge/final/settlement authorization, even if it is labelled as “authorization”, “sanction”, “clearance”, “cashless approval”, or similar.
+- Map any referral / corporate referral letters into the approval fields as well and populate `approval_stage` with the best matching stage name (Final Approval/Discharge Approval/Interim Approval/Pre-Auth/Referral/None).
 
 Output EXACTLY this JSON structure:
 {{
