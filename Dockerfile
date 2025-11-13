@@ -33,4 +33,4 @@ ENV HOST=0.0.0.0 \
     FLASK_APP=app.py
 
 # Start the Socket.IO app using gunicorn with eventlet worker, honoring $PORT
-CMD ["/bin/sh", "-c", "gunicorn --worker-class eventlet --workers 1 --bind 0.0.0.0:${PORT:-5000} app:app"]
+CMD ["/bin/sh", "-c", "gunicorn --worker-class eventlet --workers 1 --timeout 0 --graceful-timeout 0 --bind 0.0.0.0:${PORT:-5000} app:app"]
