@@ -64,12 +64,15 @@ function setupEventListeners() {
     document.getElementById('enable-tariff-check').addEventListener('change', (e) => {
         const tariffFields = document.getElementById('tariff-fields');
         const tariffFieldsPayer = document.getElementById('tariff-fields-payer');
+        const tariffJsonField = document.getElementById('tariff-json-field');
         if (e.target.checked) {
             tariffFields.style.display = 'block';
             tariffFieldsPayer.style.display = 'block';
+            if (tariffJsonField) tariffJsonField.style.display = 'block';
         } else {
             tariffFields.style.display = 'none';
             tariffFieldsPayer.style.display = 'none';
+            if (tariffJsonField) tariffJsonField.style.display = 'none';
         }
     });
     
@@ -155,6 +158,8 @@ async function handleClaimSubmit(e) {
     const ignoreDiscrepancies = document.getElementById('ignore-discrepancies').checked;
     const hospitalId = document.getElementById('hospital-id').value.trim();
     const payerId = document.getElementById('payer-id').value.trim();
+    const tariffsTextarea = document.getElementById('tariffs-json');
+    const tariffsJsonRaw = tariffsTextarea ? tariffsTextarea.value.trim() : '';
     
     if (!files || files.length === 0) {
         alert('Please upload at least one document.');
@@ -167,17 +172,24 @@ async function handleClaimSubmit(e) {
     }
     
     // Add options
-    formData.append('enable_tariff_check', enableTariffCheck);
-    formData.append('include_payer_checklist', includePayerChecklist);
-    formData.append('ignore_discrepancies', ignoreDiscrepancies);
+    formData.append('enable_tariff_check', String(enableTariffCheck));
+    formData.append('include_payer_checklist', String(includePayerChecklist));
+    formData.append('ignore_discrepancies', String(ignoreDiscrepancies));
     
     if (enableTariffCheck) {
-        if (!hospitalId || !payerId) {
-            alert('Hospital ID and Payer ID are required when tariff checking is enabled.');
+        if (hospitalId) formData.append('hospital_id', hospitalId);
+        if (payerId) formData.append('payer_id', payerId);
+        if (!tariffsJsonRaw) {
+            alert('Please provide the tariff dataset in JSON format.');
             return;
         }
-        formData.append('hospital_id', hospitalId);
-        formData.append('payer_id', payerId);
+        try {
+            JSON.parse(tariffsJsonRaw);
+        } catch (error) {
+            alert('Invalid tariff JSON. Please ensure it is valid JSON.');
+            return;
+        }
+        formData.append('tariffs', tariffsJsonRaw);
     }
     
     // Reset progress

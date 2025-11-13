@@ -9,7 +9,7 @@ A comprehensive Flask-based API system for processing and quality checking healt
 2. **Date Validation**: Ensures all line item dates fall within approved date ranges
 3. **Line Item Analysis**: Detailed validation of billed items with payer-specific checklists
 4. **Report Verification**: Checks report dates against invoice dates and identifies discrepancies
-5. **Tariff Validation**: Optional tariff checking against database (hospital ID + payer ID matching)
+5. **Tariff Validation**: Optional validation against a tariff JSON payload supplied with the claim request
 6. **Implant Verification**: Checks for required pouches and stickers for implant procedures
 
 ### API Features
@@ -127,7 +127,7 @@ You can containerize the application with the provided `Dockerfile`.
      - Insurer Document
      - Approval Document
      - Hospital Document
-   - Optionally provide Hospital ID and Payer ID for tariff checking
+   - Optionally provide a tariff JSON dataset for tariff checking
    - Click "Process Claim"
    - Watch real-time progress updates
    - View detailed results when complete
@@ -163,8 +163,7 @@ curl -X POST http://localhost:5000/api/claims/process \
   -F "document_types=insurer" \
   -F "document_types=approval" \
   -F "document_types=hospital" \
-  -F "hospital_id=HOSP001" \
-  -F "payer_id=PAYER001"
+  -F "tariffs=$(cat tariffs.json)"
 ```
 
 #### Get Claim Results

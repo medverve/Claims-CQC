@@ -218,7 +218,8 @@ body {
 .form-group input[type="text"],
 .form-group input[type="email"],
 .form-group input[type="password"],
-.form-group input[type="file"] {
+.form-group input[type="file"],
+.form-group textarea {
     width: 100%;
     padding: 10px;
     border: 1px solid #ddd;
@@ -228,6 +229,12 @@ body {
 
 .form-group input[type="file"] {
     padding: 8px;
+}
+
+.form-group textarea {
+    min-height: 140px;
+    resize: vertical;
+    line-height: 1.4;
 }
 
 .form-help {

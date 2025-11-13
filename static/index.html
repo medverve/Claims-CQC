@@ -97,7 +97,7 @@
                                 <label>
                                     <input type="checkbox" id="enable-tariff-check"> Enable Tariff Checking
                                 </label>
-                                <p class="form-help">Requires Hospital ID and Payer ID below</p>
+                                <p class="form-help">Provide the tariff dataset in JSON to validate billed amounts against reference prices.</p>
                             </div>
                             <div class="form-group" id="tariff-fields" style="display: none;">
                                 <label>Hospital ID</label>
@@ -106,6 +106,11 @@
                             <div class="form-group" id="tariff-fields-payer" style="display: none;">
                                 <label>Payer ID</label>
                                 <input type="text" id="payer-id" placeholder="Enter payer ID">
+                            </div>
+                            <div class="form-group" id="tariff-json-field" style="display: none;">
+                                <label>Tariff Dataset (JSON)</label>
+                                <textarea id="tariffs-json" placeholder='[{"item_code": "ABC123", "tariff_price": 1500}]' rows="6"></textarea>
+                                <p class="form-help">Provide tariff rows as JSON. Each item should contain identifiers (item_code or item_name) and the reference price.</p>
                             </div>
                             <div class="form-group">
                                 <label>

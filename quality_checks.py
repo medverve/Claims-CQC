@@ -1,9 +1,7 @@
 from typing import Dict, List, Any, Optional
 from gemini_service import GeminiService
-from models import Tariff, db
 import json
 from datetime import datetime, timezone
-from math import isfinite
 from pathlib import Path
 
 class QualityChecker:
@@ -117,53 +115,74 @@ class QualityChecker:
             'total_items': len(line_items)
         }
     
-    def check_tariffs(self, line_items: List[Dict], hospital_id: str, payer_id: str) -> Dict[str, Any]:
+    def check_tariffs(self, line_items: List[Dict], tariffs_data: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """
-        Check line items against tariff database (optional feature)
-        
-        Args:
-            line_items: List of line items
-            hospital_id: Hospital identifier
-            payer_id: Payer identifier
-        
-        Returns:
-            Dict with tariff matches and discrepancies
+        Check line items against provided tariff dataset (optional feature)
         """
+        tariffs_data = tariffs_data or []
+        normalized_by_code = {}
+        normalized_by_name = {}
+
+        for entry in tariffs_data:
+            if not isinstance(entry, dict):
+                continue
+            code = (entry.get('item_code') or entry.get('code') or '').strip().lower()
+            name = (entry.get('item_name') or entry.get('name') or '').strip().lower()
+            if code:
+                normalized_by_code[code] = entry
+            if name:
+                normalized_by_name.setdefault(name, entry)
+
         tariff_results = []
-        
+
         for item in line_items:
-            item_code = item.get('item_code') or item.get('code')
-            item_name = item.get('item_name') or item.get('name')
-            billed_price = item.get('price') or item.get('total_price', 0)
-            
-            if item_code:
-                tariff = Tariff.query.filter_by(
-                    hospital_id=hospital_id,
-                    payer_id=payer_id,
-                    item_code=item_code
-                ).first()
-                
-                if tariff:
-                    price_match = abs(tariff.price - billed_price) < 0.01
-                    tariff_results.append({
-                        'item_code': item_code,
-                        'item_name': item_name,
-                        'billed_price': billed_price,
-                        'tariff_price': tariff.price,
-                        'match': price_match,
-                        'difference': billed_price - tariff.price if not price_match else 0
-                    })
-                else:
-                    tariff_results.append({
-                        'item_code': item_code,
-                        'item_name': item_name,
-                        'billed_price': billed_price,
-                        'tariff_price': None,
-                        'match': False,
-                        'difference': None,
-                        'note': 'No tariff found'
-                    })
-        
+            item_code_raw = item.get('item_code') or item.get('code')
+            item_name_raw = item.get('normalized_name') or item.get('item_name') or item.get('name')
+            code_key = (item_code_raw or '').strip().lower()
+            name_key = (item_name_raw or '').strip().lower()
+
+            billed_price = self._safe_float(item.get('price') or item.get('total_price'))
+            tariff_entry = None
+
+            if code_key and code_key in normalized_by_code:
+                tariff_entry = normalized_by_code[code_key]
+            elif name_key and name_key in normalized_by_name:
+                tariff_entry = normalized_by_name[name_key]
+
+            if tariff_entry:
+                tariff_price = self._safe_float(
+                    tariff_entry.get('tariff_price')
+                    or tariff_entry.get('price')
+                    or tariff_entry.get('amount')
+                )
+                price_match = (
+                    tariff_price is None or billed_price is None
+                    or abs(billed_price - tariff_price) < 0.01
+                )
+                difference = None
+                if billed_price is not None and tariff_price is not None:
+                    difference = round(billed_price - tariff_price, 2)
+
+                tariff_results.append({
+                    'item_code': item_code_raw,
+                    'item_name': item_name_raw,
+                    'billed_price': billed_price,
+                    'tariff_price': tariff_price,
+                    'match': price_match,
+                    'difference': difference,
+                    'reference': tariff_entry
+                })
+            else:
+                tariff_results.append({
+                    'item_code': item_code_raw,
+                    'item_name': item_name_raw,
+                    'billed_price': billed_price,
+                    'tariff_price': None,
+                    'match': False,
+                    'difference': None,
+                    'note': 'No tariff reference provided'
+                })
+
         return {
             'type': 'tariffs',
             'tariff_checks': tariff_results,

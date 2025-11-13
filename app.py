@@ -523,17 +523,17 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
             firestore_service.add_claim_result(claim_id, 'comprehensive_checklist', line_item_result)
             
             # Step 7: Tariff Check (optional)
-            if claim.get('hospital_id') and claim.get('payer_id'):
+            tariffs_payload = claim.get('tariffs_data') or []
+            if tariffs_payload:
                 socketio.emit('progress', {
                     'step': 'tariff_check',
-                    'message': 'Checking against tariff database...',
+                    'message': 'Checking against provided tariff dataset...',
                     'progress': 85
                 }, room=session_id)
                 
                 tariff_result = checker.check_tariffs(
                     line_items,
-                    claim['hospital_id'],
-                    claim['payer_id']
+                    tariffs_payload
                 )
                 firestore_service.add_claim_result(claim_id, 'tariffs', tariff_result)
             
@@ -650,6 +650,24 @@ def process_claim():
     enable_tariff_check = request.form.get('enable_tariff_check', 'false').lower() == 'true'
     include_payer_checklist = request.form.get('include_payer_checklist', 'true').lower() == 'true'
     ignore_discrepancies = request.form.get('ignore_discrepancies', 'false').lower() == 'true'
+    tariffs_payload = []
+
+    if enable_tariff_check:
+        tariffs_raw = request.form.get('tariffs', '').strip()
+        if not tariffs_raw:
+            return jsonify({'error': 'Tariffs JSON is required when tariff checking is enabled.'}), 400
+        try:
+            parsed_tariffs = json.loads(tariffs_raw)
+            if isinstance(parsed_tariffs, dict):
+                tariffs_payload = [parsed_tariffs]
+            elif isinstance(parsed_tariffs, list):
+                tariffs_payload = [t for t in parsed_tariffs if isinstance(t, dict)]
+            else:
+                raise ValueError
+            if not tariffs_payload:
+                raise ValueError
+        except (ValueError, json.JSONDecodeError):
+            return jsonify({'error': 'Invalid tariffs JSON. Provide a JSON object or array of objects.'}), 400
     
     if not files or all(not f.filename for f in files):
         return jsonify({'error': 'No valid documents provided'}), 400
@@ -665,7 +683,8 @@ def process_claim():
         'ignore_discrepancies': ignore_discrepancies,
         'include_payer_checklist': include_payer_checklist,
         'status': 'processing',
-        'request_source': 'internal' if internal_request else ('api_key' if api_key_value else 'external_public')
+        'request_source': 'internal' if internal_request else ('api_key' if api_key_value else 'external_public'),
+        'tariffs_data': tariffs_payload if enable_tariff_check else []
     }
     claim_id = firestore_service.create_claim(claim_payload)
     
