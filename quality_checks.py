@@ -111,6 +111,8 @@ class QualityChecker:
             'case_specific_checklist': result.get('case_specific_checklist', []),
             'all_discrepancies': result.get('all_discrepancies', []),
             'approval_treatment_match': result.get('approval_treatment_match', {}),
+            'dynamic_document_requirements': result.get('dynamic_document_requirements', []),
+            'investigation_discrepancies': result.get('investigation_discrepancies', []),
             'code_verification': result.get('code_verification', {}),
             'total_items': len(line_items)
         }
@@ -332,6 +334,52 @@ class QualityChecker:
         return False
     
     @staticmethod
+    def _has_implants_in_procedures(case_summary: Dict[str, Any], line_items: List[Dict[str, Any]]) -> bool:
+        """Check if procedures involve actual implants like stents, rods, screws, plates, nails, etc."""
+        # Implant keywords that indicate actual medical implants
+        implant_keywords = [
+            'stent', 'rod', 'screw', 'plate', 'nail', 'pin', 'wire', 'cage', 'disc',
+            'prosthesis', 'prosthetic', 'implant', 'fixation', 'replacement', 'graft',
+            'mesh', 'pacemaker', 'icd', 'defibrillator', 'coil', 'clip', 'valve',
+            'hip replacement', 'knee replacement', 'shoulder replacement', 'elbow replacement',
+            'ankle replacement', 'joint replacement', 'total hip', 'total knee',
+            'dental implant', 'dental crown', 'dental bridge', 'orthopedic implant',
+            'cardiac implant', 'vascular implant', 'neurological implant'
+        ]
+        
+        # Check procedures for implant-related terms
+        procedures = case_summary.get('procedures_performed', []) or case_summary.get('procedures', [])
+        for proc in procedures:
+            proc_name = ''
+            if isinstance(proc, dict):
+                proc_name = (proc.get('procedure_name') or proc.get('name') or '').lower()
+            elif isinstance(proc, str):
+                proc_name = proc.lower()
+            
+            if any(keyword in proc_name for keyword in implant_keywords):
+                return True
+        
+        # Check line items for implant-related items
+        for item in line_items:
+            item_name = (item.get('item_name') or '').lower()
+            item_category = (item.get('category') or '').lower()
+            item_type = (item.get('type') or '').lower()
+            
+            # Check if item name contains implant keywords
+            if any(keyword in item_name for keyword in implant_keywords):
+                return True
+            
+            # Check if category is explicitly "implant" or "medical implant"
+            if 'implant' in item_category and item_category in ['implant', 'medical implant', 'surgical implant']:
+                return True
+            
+            # Check for specific implant item codes or types
+            if item_type == 'implant' or 'implant' in item_type:
+                return True
+        
+        return False
+    
+    @staticmethod
     def _safe_float(value: Any) -> Optional[float]:
         """Convert value to float safely."""
         if value is None:
@@ -411,6 +459,10 @@ class QualityChecker:
         final_terms = {'final', 'discharge', 'settlement', 'clearance'}
         
         for doc_key, doc in documents.items():
+            # Ensure doc is always a dict, not a string or other type
+            if not isinstance(doc, dict):
+                print(f"Warning: Document '{doc_key}' is not a dict (type: {type(doc).__name__}), skipping...")
+                continue
             doc = doc or {}
             assessment = doc.get('cashless_assessment') or {}
             if assessment:
@@ -446,6 +498,9 @@ class QualityChecker:
                 detected_sources.add(doc_key)
         
         for doc in documents.values():
+            # Ensure doc is always a dict, not a string or other type
+            if not isinstance(doc, dict):
+                continue
             doc = doc or {}
             descriptor = (doc.get('document_descriptor') or {})
             doc_type = (descriptor.get('probable_document_type') or '').lower()
@@ -504,9 +559,11 @@ class QualityChecker:
         if not has_final_approval and cashless_flag and approval_refs:
             has_final_approval = True
 
-        is_cashless = bool(cashless_flag or has_final_approval)
-        status = 'valid' if is_cashless else 'invalid'
-        reason = 'Final/discharge approval letter identified from payer.' if is_cashless else 'Missing final or discharge approval from payer.'
+        # ALWAYS assume cashless - no validation needed
+        is_cashless = True
+        status = 'valid'
+        has_final_approval = True if approval_refs or cashless_flag else False
+        reason = 'Cashless claim processed. Approval letter details extracted.' if approval_refs or cashless_flag else 'Cashless claim processed.'
         
         return {
             'status': status,
@@ -590,10 +647,26 @@ class QualityChecker:
             entry['units'] = raw_item.get('units')
             entry['unit_price'] = self._safe_float(raw_item.get('unit_price'))
             entry['total_price'] = self._safe_float(raw_item.get('total_price'))
-            entry['need_proof'] = self._to_bool(raw_item.get('requires_proof'))
+            # Check both requires_proof and proof_required (sequential analysis uses proof_required)
+            entry['need_proof'] = self._to_bool(raw_item.get('requires_proof')) or self._to_bool(raw_item.get('proof_required'))
+            # Also check item type - investigative items and implants always need proof
+            if not entry['need_proof']:
+                item_type = (raw_item.get('type') or '').lower()
+                item_category = (raw_item.get('category') or '').lower()
+                if item_type == 'investigative' or 'implant' in item_category or 'implant' in (raw_item.get('item_name') or '').lower():
+                    entry['need_proof'] = True
             entry['proof_included'] = self._to_bool(raw_item.get('proof_included'))
             proof_accuracy = raw_item.get('proof_accuracy')
             entry['proof_accurate'] = self._to_bool(proof_accuracy) if proof_accuracy is not None else None
+            # Handle proof_validation fields
+            proof_validation = raw_item.get('proof_validation', {})
+            if proof_validation:
+                entry['proof_validation'] = {
+                    'patient_name_match': self._to_bool(proof_validation.get('patient_name_match')),
+                    'date_within_range': self._to_bool(proof_validation.get('date_within_range')),
+                    'report_count_valid': self._to_bool(proof_validation.get('report_count_valid')),
+                    'validation_notes': proof_validation.get('validation_notes')
+                }
             entry['is_implant'] = self._to_bool(raw_item.get('is_implant'))
             entry['needs_tariff_check'] = self._to_bool(raw_item.get('needs_tariff_check'))
             notes = raw_item.get('notes')
@@ -618,6 +691,16 @@ class QualityChecker:
             proof_accuracy = raw_item.get('proof_accuracy')
             if proof_accuracy is not None:
                 entry['proof_accurate'] = self._to_bool(proof_accuracy)
+            # Handle proof_validation fields - merge if present
+            proof_validation = raw_item.get('proof_validation', {})
+            if proof_validation:
+                existing_validation = entry.get('proof_validation', {})
+                entry['proof_validation'] = {
+                    'patient_name_match': self._to_bool(proof_validation.get('patient_name_match')) if proof_validation.get('patient_name_match') is not None else existing_validation.get('patient_name_match'),
+                    'date_within_range': self._to_bool(proof_validation.get('date_within_range')) if proof_validation.get('date_within_range') is not None else existing_validation.get('date_within_range'),
+                    'report_count_valid': self._to_bool(proof_validation.get('report_count_valid')) if proof_validation.get('report_count_valid') is not None else existing_validation.get('report_count_valid'),
+                    'validation_notes': proof_validation.get('validation_notes') or existing_validation.get('validation_notes')
+                }
             entry['needs_tariff_check'] = entry.get('needs_tariff_check', False) or self._to_bool(raw_item.get('needs_tariff_check'))
             entry['issues'] = entry.get('issues', [])
             entry['issues'].extend(self._ensure_list(raw_item.get('issues')))
@@ -646,6 +729,16 @@ class QualityChecker:
             else:
                 entry['tariff_accurate'] = None
                 entry['tariff_difference'] = None
+            
+            # Remove proof/tariff fields if proof not required
+            need_proof = entry.get('need_proof', False)
+            if not need_proof:
+                # Remove proof-related fields when proof is not required
+                entry.pop('proof_included', None)
+                entry.pop('proof_accurate', None)
+                entry.pop('proof_validation', None)
+                entry.pop('tariff_accurate', None)
+                entry.pop('tariff_difference', None)
             
             # Clean issues to unique strings
             issues = []
@@ -724,6 +817,241 @@ class QualityChecker:
             }
         }
     
+    def _format_case_summary_for_frontend(self, case_summary: Dict[str, Any], patient_info: Dict[str, Any], line_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Format case summary for frontend display with narrative"""
+        if not case_summary:
+            return {}
+        
+        patient_name = patient_info.get('patient_name', 'Patient')
+        admission_date = case_summary.get('admission_date')
+        discharge_date = case_summary.get('discharge_date')
+        admission_reason = case_summary.get('admission_reason', '')
+        primary_diagnosis = case_summary.get('primary_diagnosis', [])
+        procedures = case_summary.get('procedures_performed', [])
+        investigations = case_summary.get('investigations_done', [])
+        discharge_condition = case_summary.get('discharge_condition', 'Stable')
+        
+        # Build narrative
+        narrative_parts = []
+        if patient_name:
+            narrative_parts.append(f"{patient_name}")
+        if admission_date and discharge_date:
+            narrative_parts.append(f"was admitted on {admission_date} and discharged on {discharge_date}")
+        elif admission_date:
+            narrative_parts.append(f"was admitted on {admission_date}")
+        
+        if admission_reason:
+            narrative_parts.append(f"with presenting complaints: {admission_reason}")
+        
+        if primary_diagnosis:
+            diag_text = ', '.join(primary_diagnosis) if isinstance(primary_diagnosis, list) else str(primary_diagnosis)
+            narrative_parts.append(f"Primary diagnosis: {diag_text}")
+        
+        if procedures:
+            # Filter out None values and convert to strings
+            proc_names = []
+            for p in procedures:
+                if p is None:
+                    continue
+                if isinstance(p, dict):
+                    proc_name = p.get('procedure_name')
+                    if proc_name:
+                        proc_names.append(str(proc_name))
+                else:
+                    proc_names.append(str(p))
+            if proc_names:  # Only add if there are valid procedure names
+                narrative_parts.append(f"Procedures performed: {', '.join(proc_names)}")
+        
+        if investigations:
+            # Filter out None values and convert to strings
+            inv_names = []
+            for i in investigations:
+                if i is None:
+                    continue
+                if isinstance(i, dict):
+                    inv_name = i.get('investigation_name')
+                    if inv_name:
+                        inv_names.append(str(inv_name))
+                else:
+                    inv_names.append(str(i))
+            if inv_names:  # Only add if there are valid investigation names
+                narrative_parts.append(f"Investigations done: {', '.join(inv_names)}")
+        
+        narrative = '. '.join(narrative_parts) + '.' if narrative_parts else ''
+        
+        # Format investigations and procedures for frontend - filter out None values
+        formatted_investigations = []
+        for inv in investigations:
+            if inv is None:  # Skip None values
+                continue
+            if isinstance(inv, dict):
+                inv_name = inv.get('investigation_name')
+                if inv_name:  # Only add if name exists
+                    formatted_investigations.append({
+                        'name': inv_name,
+                        'date': inv.get('date')
+                    })
+            else:
+                formatted_investigations.append({
+                    'name': str(inv),
+                    'date': None
+                })
+        
+        formatted_procedures = []
+        for proc in procedures:
+            if proc is None:  # Skip None values
+                continue
+            if isinstance(proc, dict):
+                proc_name = proc.get('procedure_name')
+                if proc_name:  # Only add if name exists
+                    formatted_procedures.append({
+                        'name': proc_name,
+                        'date': proc.get('date')
+                    })
+            else:
+                formatted_procedures.append({
+                    'name': str(proc),
+                    'date': None
+                })
+        
+        return {
+            'narrative': narrative,
+            'investigations': formatted_investigations,
+            'procedures': formatted_procedures,
+            'discharge_condition': discharge_condition,
+            'admission_date': admission_date,
+            'discharge_date': discharge_date,
+            'length_of_stay_days': case_summary.get('length_of_stay_days'),
+            'treating_doctor': case_summary.get('treating_doctor'),
+            'speciality': case_summary.get('speciality'),
+            'primary_diagnosis': primary_diagnosis,
+            'admission_reason': admission_reason
+        }
+    
+    def _generate_case_summary(
+        self,
+        patient_name: str,
+        clinical_summary: Dict[str, Any],
+        claim_information: Dict[str, Any],
+        admission_details: Dict[str, Any],
+        line_items: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Generate case summary with patient particulars, investigations, procedures, and discharge condition"""
+        patient_name = patient_name or 'Patient'
+        clinical_summary = clinical_summary or {}
+        claim_information = claim_information or {}
+        admission_details = admission_details or {}
+        line_items = line_items or []
+        
+        # Extract admission/discharge info
+        admission_date = admission_details.get('admission_date')
+        discharge_date = admission_details.get('discharge_date')
+        presenting_complaints = clinical_summary.get('presenting_complaints', [])
+        primary_diagnosis = clinical_summary.get('primary_diagnosis', [])
+        
+        # Extract investigations from line items (items that require proof and are investigations)
+        investigations = []
+        investigation_categories = ['lab', 'radiology', 'imaging', 'investigation', 'test', 'x-ray', 'ct', 'mri', 'usg', 'ecg', 'ultrasound', 'angiogram', 'angio']
+        
+        for item in line_items:
+            item_name = (item.get('item_name') or '').lower()
+            item_category = (item.get('category') or '').lower()
+            need_proof = item.get('need_proof', False)
+            date_of_service = item.get('date')
+            
+            # Check if it's an investigation (requires proof and matches investigation categories)
+            if need_proof and any(cat in item_name or cat in item_category for cat in investigation_categories):
+                investigations.append({
+                    'name': item.get('item_name') or 'Unknown',
+                    'date': date_of_service
+                })
+        
+        # Extract procedures from line items (procedures, surgeries, OT charges)
+        procedures = []
+        procedure_categories = ['procedure', 'surgery', 'ot charges', 'operation', 'surgical', 'angioplasty', 'stent']
+        
+        for item in line_items:
+            item_name = (item.get('item_name') or '').lower()
+            item_category = (item.get('category') or '').lower()
+            date_of_service = item.get('date')
+            
+            # Check if it's a procedure
+            if any(cat in item_name or cat in item_category for cat in procedure_categories):
+                procedures.append({
+                    'name': item.get('item_name') or 'Unknown',
+                    'date': date_of_service
+                })
+        
+        # Also get procedures from clinical summary
+        procedures_performed = clinical_summary.get('procedures_performed', [])
+        for proc in procedures_performed:
+            if isinstance(proc, str):
+                # Try to find date from line items
+                proc_lower = proc.lower()
+                proc_date = None
+                for item in line_items:
+                    item_name_lower = (item.get('item_name') or '').lower()
+                    if proc_lower in item_name_lower or item_name_lower in proc_lower:
+                        proc_date = item.get('date')
+                        break
+                
+                # Check if not already added
+                if not any(p['name'].lower() == proc.lower() for p in procedures):
+                    procedures.append({
+                        'name': proc,
+                        'date': proc_date
+                    })
+        
+        # Build narrative summary
+        narrative_parts = []
+        
+        # Admission reason
+        if presenting_complaints:
+            complaints = ', '.join(presenting_complaints[:2])  # First 2 complaints
+            narrative_parts.append(f"{patient_name} was admitted with {complaints}")
+        elif primary_diagnosis:
+            diagnosis = ', '.join(primary_diagnosis[:1])  # First diagnosis
+            narrative_parts.append(f"{patient_name} was admitted for {diagnosis}")
+        else:
+            narrative_parts.append(f"{patient_name} was admitted")
+        
+        # Investigations done
+        if investigations:
+            inv_names = [inv['name'] for inv in investigations[:5]]  # First 5 investigations
+            narrative_parts.append(f"{', '.join(inv_names)} were done")
+            if len(investigations) > 5:
+                narrative_parts.append(f"and {len(investigations) - 5} more investigations")
+        
+        # Procedures done
+        if procedures:
+            for proc in procedures:
+                proc_name = proc['name']
+                proc_date = proc['date']
+                if proc_date:
+                    narrative_parts.append(f"{proc_name} was performed on {proc_date}")
+                else:
+                    narrative_parts.append(f"{proc_name} was performed")
+        
+        # Discharge condition
+        if discharge_date:
+            narrative_parts.append(f"Patient was discharged on {discharge_date}")
+        elif admission_date:
+            narrative_parts.append("Patient was discharged")
+        
+        narrative = '. '.join(narrative_parts) + '.'
+        
+        return {
+            'narrative': narrative,
+            'patient_name': patient_name,
+            'admission_date': admission_date,
+            'discharge_date': discharge_date,
+            'presenting_complaints': presenting_complaints,
+            'primary_diagnosis': primary_diagnosis,
+            'investigations': investigations,
+            'procedures': procedures,
+            'discharge_condition': clinical_summary.get('discharge_condition') or 'Stable'
+        }
+    
     def _collect_discrepancies(
         self,
         patient_result: Dict[str, Any],
@@ -735,23 +1063,45 @@ class QualityChecker:
         discrepancies: List[Dict[str, Any]] = []
         
         for disc in patient_result.get('discrepancies', []):
+            # Filter out matches - only include actual discrepancies
+            desc = (disc.get('description') or '').lower()
+            # Skip if description indicates a match (e.g., "is present", "matches", "is consistent")
+            if any(phrase in desc for phrase in ['is present', 'matches', 'is consistent', 'is correct', 'found in', 'is available']):
+                continue
+            # Only include if there's an actual mismatch
+            expected = disc.get('expected_value')
+            actual = disc.get('actual_value')
+            if expected and actual and str(expected).lower() == str(actual).lower():
+                continue  # Skip matches
+            
             discrepancies.append({
                 'category': 'Patient Details',
                 'severity': (disc.get('severity') or 'low').capitalize(),
                 'description': disc.get('description'),
-                'expected': disc.get('expected_value'),
-                'actual': disc.get('actual_value'),
+                'expected': expected,
+                'actual': actual,
                 'source': disc.get('document_type'),
                 'impact': disc.get('impact')
             })
         
         for disc in patient_result.get('date_discrepancies', []):
+            # Filter out matches - only include actual discrepancies
+            desc = (disc.get('description') or '').lower()
+            # Skip if description indicates a match (e.g., "is present", "matches", "is consistent")
+            if any(phrase in desc for phrase in ['is present', 'matches', 'is consistent', 'is correct', 'found in']):
+                continue
+            # Only include if there's an actual mismatch
+            expected_date = disc.get('expected_date')
+            actual_date = disc.get('date_value')
+            if expected_date and actual_date and expected_date == actual_date:
+                continue  # Skip matches
+            
             discrepancies.append({
                 'category': 'Dates',
                 'severity': (disc.get('severity') or 'low').capitalize(),
                 'description': disc.get('description') or f"{disc.get('date_type')} mismatch",
-                'expected': disc.get('expected_date'),
-                'actual': disc.get('date_value'),
+                'expected': expected_date,
+                'actual': actual_date,
                 'source': disc.get('document')
             })
         
@@ -810,8 +1160,330 @@ class QualityChecker:
             d for d in discrepancies
             if any(d.get(field) for field in ('description', 'expected', 'actual'))
         ]
-        discrepancies.sort(key=lambda d: (self._severity_rank(d.get('severity')), d.get('category') or '', d.get('description') or ''))
-        return discrepancies
+        
+        # Deduplicate discrepancies - same description, category, and source should appear only once
+        seen = set()
+        unique_discrepancies = []
+        for disc in discrepancies:
+            # Create a unique key from description, category, and source
+            desc = (disc.get('description') or '').strip().lower()
+            cat = (disc.get('category') or '').strip().lower()
+            src = (disc.get('source') or '').strip().lower()
+            key = f"{cat}|||{desc}|||{src}"
+            
+            if key not in seen:
+                seen.add(key)
+                # Ensure source includes document name if available
+                if src and src not in ['line item', 'reports', 'dates', 'patient details']:
+                    disc['source'] = f"{src} Document"
+                unique_discrepancies.append(disc)
+        
+        unique_discrepancies.sort(key=lambda d: (self._severity_rank(d.get('severity')), d.get('category') or '', d.get('description') or ''))
+        return unique_discrepancies
+    
+    def build_final_report_from_sequential(
+        self,
+        sequential_results: Dict[str, Any],
+        cashless_status: Dict[str, Any],
+        include_payer_checklist: bool
+    ) -> Dict[str, Any]:
+        """Build final report directly from sequential analysis results"""
+        # Sequential results structure: sequential_analysis contains all the data
+        seq_data = sequential_results.get('sequential_analysis', sequential_results)
+        case_summary = seq_data.get('case_summary', {})
+        case_checklist = seq_data.get('case_specific_checklist', [])
+        discrepancies = seq_data.get('discrepancies', [])
+        possible_issues = seq_data.get('possible_issues', [])
+        
+        patient_info = seq_data.get('patient_information', {})
+        payer_info = seq_data.get('payer_information', {})
+        hospital_info = seq_data.get('hospital_information', {})
+        line_items = seq_data.get('line_items', [])
+        
+        # Get approved amount from approval_verification (if available in sequential results)
+        # Check multiple possible locations for approved_amount
+        approval_verification = seq_data.get('approval_verification', {})
+        approved_amount = (
+            approval_verification.get('approved_amount') or 
+            payer_info.get('approved_amount') or 
+            approval_verification.get('total_approved_amount') or
+            0.0
+        )
+        
+        # Build totals from line items - use total_price or total_cost
+        total_claimed = sum(
+            float(item.get('total_price') or item.get('total_cost') or 0)
+            for item in line_items
+        )
+        total_approved = float(approved_amount) if approved_amount else 0.0
+        
+        # Process line items to convert proof_required to need_proof and ensure proper formatting
+        processed_line_items = []
+        for item in line_items:
+            processed_item = dict(item)  # Copy item
+            # Convert proof_required to need_proof for frontend
+            proof_required = self._to_bool(item.get('proof_required', False))
+            item_type = (item.get('type') or '').lower()
+            item_category = (item.get('category') or '').lower()
+            item_name_lower = (item.get('item_name') or '').lower()
+            
+            # Set need_proof based on proof_required or item type
+            if proof_required:
+                processed_item['need_proof'] = True
+            elif item_type == 'investigative' or 'implant' in item_category or 'implant' in item_name_lower:
+                processed_item['need_proof'] = True
+            else:
+                processed_item['need_proof'] = False
+            
+            # Map report_enclosed to proof_included for investigative items
+            if item_type == 'investigative':
+                processed_item['proof_included'] = self._to_bool(item.get('report_enclosed', False))
+            else:
+                processed_item['proof_included'] = self._to_bool(item.get('proof_included', False))
+            
+            # Ensure proper field names for frontend
+            processed_item['units'] = item.get('units_billed') or item.get('units')
+            processed_item['unit_price'] = item.get('cost_per_unit') or item.get('unit_price')
+            processed_item['total_price'] = item.get('total_cost') or item.get('total_price')
+            processed_item['date'] = item.get('date_of_service') or item.get('date')
+            
+            processed_line_items.append(processed_item)
+        
+        # Build invoice analysis with processed line items
+        invoice_analysis = {
+            'line_items': processed_line_items,
+            'totals': {
+                'claimed_total': total_claimed,
+                'approved_total': total_approved,
+                'difference': total_claimed - total_approved if total_approved > 0 else None,
+                'totals_match': round(total_claimed, 2) == round(total_approved, 2) if total_approved > 0 else None
+            },
+            'currency': 'INR',
+            'invoice_number': hospital_info.get('invoice_number'),
+            'invoice_date': hospital_info.get('invoice_date')
+        }
+        
+        # Format case summary for frontend - ensure we have data
+        if not case_summary or not isinstance(case_summary, dict):
+            # If case summary is empty, try to build it from available data
+            case_summary = {
+                'admission_date': patient_info.get('admission_date') or hospital_info.get('admission_date'),
+                'discharge_date': patient_info.get('discharge_date') or hospital_info.get('discharge_date'),
+                'primary_diagnosis': [],
+                'procedures_performed': [],
+                'investigations_done': [],
+                'admission_reason': '',
+                'treating_doctor': hospital_info.get('treating_doctor'),
+                'speciality': hospital_info.get('speciality'),
+                'discharge_condition': 'Stable'
+            }
+        
+        formatted_case_summary = self._format_case_summary_for_frontend(case_summary, patient_info, processed_line_items)
+        
+        # If formatted case summary is still empty, create a basic one
+        if not formatted_case_summary or not formatted_case_summary.get('narrative'):
+            patient_name = patient_info.get('patient_name', 'Patient')
+            admission_date = case_summary.get('admission_date')
+            discharge_date = case_summary.get('discharge_date')
+            narrative_parts = [patient_name]
+            if admission_date:
+                narrative_parts.append(f"admitted on {admission_date}")
+            if discharge_date:
+                narrative_parts.append(f"discharged on {discharge_date}")
+            formatted_case_summary = {
+                'narrative': '. '.join(narrative_parts) + '.' if narrative_parts else 'Case summary not available.',
+                'investigations': [],
+                'procedures': [],
+                'discharge_condition': case_summary.get('discharge_condition', 'Stable'),
+                'admission_date': admission_date,
+                'discharge_date': discharge_date
+            }
+        
+        # Build final report
+        final_report = {
+            'version': '2025.12.01',
+            'metadata': {
+                'generated_at': datetime.now(timezone.utc).isoformat(),
+                'tariff_check_executed': False,
+                'include_payer_checklist': include_payer_checklist,
+                'analysis_method': 'sequential'
+            },
+            'case_summary': formatted_case_summary,
+            'cashless_verification': cashless_status,
+            'payer_details': {
+                'payer_type': payer_info.get('payer_type'),
+                'payer_name': payer_info.get('payer_name'),
+                'hospital_name': hospital_info.get('hospital_name'),
+                'payer_details': {
+                    'payer_type': payer_info.get('payer_type'),
+                    'payer_name': payer_info.get('payer_name'),
+                    'approving_entity': payer_info.get('approving_entity')
+                },
+                'hospital_details': {
+                    'hospital_name': hospital_info.get('hospital_name'),
+                    'hospital_id': hospital_info.get('hospital_id')
+                }
+            },
+            'patient_profile': {
+                'patient_name_from_id_card': patient_info.get('patient_name'),
+                'gender': patient_info.get('gender'),
+                'age_years': patient_info.get('age_years'),
+                'date_of_birth': patient_info.get('date_of_birth'),
+                'policy_number': patient_info.get('policy_number'),
+                'contact_info': patient_info.get('contact_info', {})
+            },
+            'admission_and_treatment': {
+                'claim_number': hospital_info.get('claim_number'),
+                'claim_reference_numbers': hospital_info.get('claim_reference_numbers', []),
+                'admission_type': hospital_info.get('admission_type'),
+                'line_of_treatment': hospital_info.get('line_of_treatment'),
+                'admission_date': case_summary.get('admission_date') or hospital_info.get('admission_date'),
+                'discharge_date': case_summary.get('discharge_date') or hospital_info.get('discharge_date'),
+                'length_of_stay_days': case_summary.get('length_of_stay_days') or hospital_info.get('length_of_stay_days'),
+                'treating_doctor': case_summary.get('treating_doctor') or hospital_info.get('treating_doctor'),
+                'speciality': case_summary.get('speciality') or hospital_info.get('speciality'),
+                'clinical_summary': {
+                    'diagnosis': case_summary.get('primary_diagnosis', []),
+                    'procedures': [p.get('name') or p.get('procedure_name') for p in case_summary.get('procedures', [])] if isinstance(case_summary.get('procedures'), list) else [p.get('procedure_name') for p in case_summary.get('procedures_performed', [])],
+                    'investigations': [i.get('name') or i.get('investigation_name') for i in case_summary.get('investigations', [])] if isinstance(case_summary.get('investigations'), list) else [i.get('investigation_name') for i in case_summary.get('investigations_done', [])]
+                }
+            },
+            'case_specific_requirements': {
+                'checklist': case_checklist if case_checklist else self._generate_default_checklist(case_summary, processed_line_items, payer_info),
+                'surgery': {
+                    # If ANY procedure is performed, surgery is required
+                    'required': bool(case_summary.get('procedures_performed') or case_summary.get('procedures') or formatted_case_summary.get('procedures')),
+                    'documentation': {}
+                },
+                'implants': {
+                    # Check if implants are actually used (stents, rods, screws, plates, nails, etc.)
+                    'used': self._has_implants_in_procedures(case_summary, processed_line_items),
+                    'documentation': {}
+                }
+            },
+            'invoice_analysis': invoice_analysis,
+            'other_discrepancies': discrepancies,
+            'possible_issues': [
+                {
+                    'issue_type': issue.get('issue_type') or issue.get('issue') or 'N/A',
+                    'severity': issue.get('severity') or 'medium',
+                    'description': issue.get('description') or issue.get('impact') or '-',
+                    'potential_query': issue.get('potential_query') or issue.get('solution') or '-',
+                    'recommendation': issue.get('recommendation') or issue.get('solution') or '-'
+                }
+                for issue in possible_issues
+            ],
+            'supporting_documents': {}
+        }
+        
+        return final_report
+    
+    def _generate_default_checklist(self, case_summary: Dict[str, Any], line_items: List[Dict[str, Any]], payer_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate default case-specific checklist for all claims"""
+        checklist = []
+        payer_type = payer_info.get('payer_type', 'Unknown')
+        is_govt_or_corporate = payer_type in ['Govt Scheme', 'Corporate']
+        is_tpa_or_insurer = payer_type in ['TPA', 'Insurer']
+        
+        # Default documents for ALL claims
+        default_docs = [
+            {'document_name': 'Cover Letter', 'required': True, 'enclosed': False, 'reason': 'Standard requirement for all claims', 'notes': ''},
+            {'document_name': 'Final Bill', 'required': True, 'enclosed': False, 'reason': 'Standard requirement for all claims', 'notes': ''},
+            {'document_name': 'Itemized Bill', 'required': True, 'enclosed': False, 'reason': 'Standard requirement for all claims', 'notes': ''},
+            {'document_name': 'Discharge Summary', 'required': True, 'enclosed': False, 'reason': 'Standard requirement for all claims', 'notes': ''},
+            {'document_name': 'Final Approval Letter', 'required': True, 'enclosed': False, 'reason': 'Provided by payer', 'notes': 'Final approval/authorization letter from payer'},
+            {'document_name': 'Patient ID Proof', 'required': True, 'enclosed': False, 'reason': 'Aadhar card, PAN card, or any one ID card', 'notes': 'Any one: Aadhar card, PAN card'}
+        ]
+        checklist.extend(default_docs)
+        
+        # Check for surgeries - if ANY procedure is performed, surgery is required
+        procedures = case_summary.get('procedures_performed', []) or case_summary.get('procedures', [])
+        has_surgery = len(procedures) > 0  # Any procedure means surgery
+        if has_surgery:
+            checklist.append({
+                'document_name': 'OT Notes/Operation Report',
+                'required': True,
+                'enclosed': False,
+                'reason': 'Surgeries performed as per discharge summary',
+                'notes': 'OT notes or operation report required for surgery cases'
+            })
+        
+        # Check for implants - only if procedure involves actual implants (stents, rods, screws, plates, nails, etc.)
+        has_implants = self._has_implants_in_procedures(case_summary, line_items)
+        if has_implants:
+            checklist.append({
+                'document_name': 'Implant Vendor Invoice',
+                'required': True,
+                'enclosed': False,
+                'reason': 'Implants used as per invoice',
+                'notes': 'Implant vendor invoice required'
+            })
+            checklist.append({
+                'document_name': 'Implant Sticker',
+                'required': True,
+                'enclosed': False,
+                'reason': 'Implants used',
+                'notes': 'Implant sticker required'
+            })
+            checklist.append({
+                'document_name': 'Implant Certificate',
+                'required': True,
+                'enclosed': False,
+                'reason': 'Implants used as per procedure',
+                'notes': 'Implant certificate required'
+            })
+            if is_govt_or_corporate:
+                checklist.append({
+                    'document_name': 'Implant Pouch',
+                    'required': True,
+                    'enclosed': False,
+                    'reason': 'Implants used AND govt/corporate payer',
+                    'notes': 'Implant pouch required for govt/corporate payers'
+                })
+        
+        # Preauth form for TPA & Insurance payers only
+        if is_tpa_or_insurer:
+            checklist.append({
+                'document_name': 'Preauth Form',
+                'required': True,
+                'enclosed': False,
+                'reason': 'TPA/Insurance payer requirement',
+                'notes': 'Pre-authorization form required for TPA and Insurance payers'
+            })
+        
+        # Referral letters for Schemes and Corporates
+        if is_govt_or_corporate:
+            checklist.append({
+                'document_name': 'Referral Letter',
+                'required': True,
+                'enclosed': False,
+                'reason': 'Govt Scheme/Corporate payer requirement',
+                'notes': 'Referral letter required for Govt Scheme and Corporate payers'
+            })
+        
+        # Employee ID card for Corporates
+        if payer_type == 'Corporate':
+            checklist.append({
+                'document_name': 'Employee ID Card',
+                'required': True,
+                'enclosed': False,
+                'reason': 'Corporate payer requirement',
+                'notes': 'Employee ID card required for Corporate payers'
+            })
+        
+        # Get all investigations from invoice line items
+        investigation_items = [item for item in line_items if item.get('type', '').lower() == 'investigative']
+        for inv_item in investigation_items:
+            inv_name = inv_item.get('item_name', 'Unknown Investigation')
+            checklist.append({
+                'document_name': f'Investigation Report - {inv_name}',
+                'required': True,
+                'enclosed': inv_item.get('report_enclosed', False),
+                'reason': f'Investigation billed: {inv_name}',
+                'notes': f'Report required for {inv_name}'
+            })
+        
+        return checklist
     
     def build_final_report(
         self,
@@ -945,6 +1617,40 @@ class QualityChecker:
             'items': checklist_result.get('payer_specific_checklist', [])
         }
         
+        # Merge dynamic document requirements with case requirements
+        dynamic_docs = checklist_result.get('dynamic_document_requirements', [])
+        if dynamic_docs:
+            # Update case_requirements with dynamic requirements
+            for doc_req in dynamic_docs:
+                doc_name = doc_req.get('document_name', '').lower()
+                if 'death' in doc_name or 'icp' in doc_name:
+                    case_requirements['death_reports'] = {
+                        'required': doc_req.get('required', False),
+                        'present': doc_req.get('present', False),
+                        'reason': doc_req.get('reason', ''),
+                        'notes': doc_req.get('notes', '')
+                    }
+                elif 'surgery' in doc_name and 'notes' in doc_name:
+                    if 'surgery' not in case_requirements:
+                        case_requirements['surgery'] = {}
+                    case_requirements['surgery']['documentation'] = {
+                        'status': 'Enclosed' if doc_req.get('present', False) else 'Not Enclosed',
+                        'required': doc_req.get('required', False),
+                        'notes': doc_req.get('notes', '')
+                    }
+                elif 'implant' in doc_name:
+                    if 'implants' not in case_requirements:
+                        case_requirements['implants'] = {}
+                    if 'documentation' not in case_requirements['implants']:
+                        case_requirements['implants']['documentation'] = {}
+                    
+                    if 'vendor invoice' in doc_name or 'invoice' in doc_name:
+                        case_requirements['implants']['documentation']['vendor_invoice'] = 'Enclosed' if doc_req.get('present', False) else 'Not Enclosed'
+                    elif 'pouch' in doc_name:
+                        case_requirements['implants']['documentation']['pouch'] = 'Enclosed' if doc_req.get('present', False) else 'Not Enclosed'
+                    elif 'sticker' in doc_name:
+                        case_requirements['implants']['documentation']['sticker'] = 'Enclosed' if doc_req.get('present', False) else 'Not Enclosed'
+        
         predictive_payload = {
             'cashless': cashless_status,
             'payer': payer_section,
@@ -959,7 +1665,9 @@ class QualityChecker:
             },
             'discrepancies': discrepancies,
             'unrelated_services': unrelated_services,
-            'case_requirements': case_requirements
+            'case_requirements': case_requirements,
+            'investigation_discrepancies': checklist_result.get('investigation_discrepancies', []),
+            'dynamic_document_requirements': dynamic_docs
         }
         predictive_analysis = self.gemini.generate_predictive_analysis(predictive_payload)
         
@@ -972,6 +1680,22 @@ class QualityChecker:
             'ignore_discrepancies': ignore_discrepancies
         }
         
+        # Enhanced approval treatment match with discharge summary analysis
+        enhanced_approval_match = approval_match.copy()
+        if 'treatment_performed' not in enhanced_approval_match:
+            enhanced_approval_match['treatment_performed'] = []
+        if 'treatment_match_alert' not in enhanced_approval_match:
+            enhanced_approval_match['treatment_match_alert'] = ''
+        
+        # Generate case summary
+        case_summary = self._generate_case_summary(
+            patient_name_from_id,
+            clinical_summary,
+            claim_information,
+            admission_details,
+            invoice_analysis.get('line_items', [])
+        )
+        
         final_report = {
             'version': '2025.11.13',
             'metadata': {
@@ -979,6 +1703,7 @@ class QualityChecker:
                 'tariff_check_executed': bool(tariff_result),
                 'include_payer_checklist': include_payer_checklist
             },
+            'case_summary': case_summary,
             'cashless_verification': cashless_status,
             'payer_details': payer_section,
             'patient_profile': patient_profile,
@@ -988,8 +1713,11 @@ class QualityChecker:
             'case_specific_requirements': case_requirements,
             'unrelated_services': unrelated_services,
             'other_discrepancies': discrepancies,
+            'approval_treatment_match': enhanced_approval_match,
+            'investigation_discrepancies': checklist_result.get('investigation_discrepancies', []),
+            'dynamic_document_requirements': dynamic_docs,
             'predictive_analysis': predictive_analysis,
-            'overall_score': overall_score,
+            'supporting_documents': supporting_documents,  # Add supporting documents for checklist
             'frontend_assets': self._get_frontend_assets()
         }
         

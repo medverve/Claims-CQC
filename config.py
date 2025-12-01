@@ -23,7 +23,7 @@ class Config:
     UNAUTHENTICATED_DAILY_LIMIT = int(os.getenv('UNAUTHENTICATED_DAILY_LIMIT', 1))
     
     # File Upload
-    MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB max file size
+    MAX_CONTENT_LENGTH = 10 * 1024 * 1024 * 1024  # 10GB - effectively no limit for practical purposes
     UPLOAD_FOLDER = 'uploads'
     ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp'}
 

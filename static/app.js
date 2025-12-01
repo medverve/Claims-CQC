@@ -32,20 +32,110 @@ function connectSocket(sessionId) {
     });
     
     socket.on('progress', (data) => {
+        console.log('Progress update received:', data);
         updateProgress(data);
+        
+        // If result is included, display it immediately
+        if (data.result) {
+            console.log('Result data received in progress:', data.result);
+            displayResults(data.result);
+        }
+        
+        // Re-enable button when processing completes or errors
+        if (data.step === 'completed' || data.step === 'error') {
+            const submitButton = document.querySelector('#claim-form button[type="submit"]');
+            if (submitButton) {
+                submitButton.disabled = false;
+                submitButton.innerHTML = 'Process Claim';
+                submitButton.classList.remove('loading');
+            }
+        }
     });
     
     socket.on('error', (data) => {
-        showError(data.message);
+        console.error('Error received:', data);
+        showError(data.message || 'An error occurred');
+        
+        // If error includes result, display it
+        if (data.result) {
+            console.log('Error result data:', data.result);
+            displayResults(data.result);
+        }
+        
+        // Re-enable button on error
+        const submitButton = document.querySelector('#claim-form button[type="submit"]');
+        if (submitButton) {
+            submitButton.disabled = false;
+            submitButton.innerHTML = 'Process Claim';
+            submitButton.classList.remove('loading');
+        }
+    });
+    
+    socket.on('warning', (data) => {
+        console.warn('Warning received:', data);
+        // Show warning but continue processing
+        if (data.message) {
+            const progressMessages = document.getElementById('progress-messages');
+            if (progressMessages) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'progress-message warning';
+                messageDiv.textContent = `Warning: ${data.message}`;
+                progressMessages.insertBefore(messageDiv, progressMessages.firstChild);
+            }
+        }
     });
     
     socket.on('connected', (data) => {
         console.log('Socket connected:', data);
     });
+    
+    // Listen for separate result event
+    socket.on('result', (data) => {
+        console.log('Result event received:', data);
+        if (data.result) {
+            displayResults(data.result);
+        }
+        
+        // Re-enable button when result is received
+        if (data.status === 'completed' || data.status === 'error') {
+            const submitButton = document.querySelector('#claim-form button[type="submit"]');
+            if (submitButton) {
+                submitButton.disabled = false;
+                submitButton.innerHTML = 'Process Claim';
+                submitButton.classList.remove('loading');
+            }
+        }
+    });
+}
+
+// Tab switching
+function setupTabs() {
+    const tabButtons = document.querySelectorAll('.tab-btn');
+    const tabContents = document.querySelectorAll('.tab-content');
+    
+    tabButtons.forEach(button => {
+        button.addEventListener('click', () => {
+            const targetTab = button.getAttribute('data-tab');
+            
+            // Remove active class from all buttons and contents
+            tabButtons.forEach(btn => btn.classList.remove('active'));
+            tabContents.forEach(content => content.classList.remove('active'));
+            
+            // Add active class to clicked button and corresponding content
+            button.classList.add('active');
+            const targetContent = document.getElementById(`tab-${targetTab}`);
+            if (targetContent) {
+                targetContent.classList.add('active');
+            }
+        });
+    });
 }
 
 // Navigation
 function setupEventListeners() {
+    // Setup tabs
+    setupTabs();
+    
     // Navigation buttons
     document.querySelectorAll('.nav-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -151,6 +241,14 @@ function updateBaseUrl() {
 async function handleClaimSubmit(e) {
     e.preventDefault();
     
+    const submitButton = e.target.querySelector('button[type="submit"]') || document.querySelector('#claim-form button[type="submit"]');
+    const originalButtonText = submitButton.innerHTML;
+    
+    // Set loading state
+    submitButton.disabled = true;
+    submitButton.innerHTML = '<span class="spinner"></span> Processing...';
+    submitButton.classList.add('loading');
+    
     const formData = new FormData();
     const files = document.getElementById('documents').files;
     const enableTariffCheck = document.getElementById('enable-tariff-check').checked;
@@ -162,6 +260,10 @@ async function handleClaimSubmit(e) {
     const tariffsJsonRaw = tariffsTextarea ? tariffsTextarea.value.trim() : '';
     
     if (!files || files.length === 0) {
+        // Reset button state on validation error
+        submitButton.disabled = false;
+        submitButton.innerHTML = originalButtonText;
+        submitButton.classList.remove('loading');
         alert('Please upload at least one document.');
         return;
     }
@@ -180,12 +282,20 @@ async function handleClaimSubmit(e) {
         if (hospitalId) formData.append('hospital_id', hospitalId);
         if (payerId) formData.append('payer_id', payerId);
         if (!tariffsJsonRaw) {
+            // Reset button state on validation error
+            submitButton.disabled = false;
+            submitButton.innerHTML = originalButtonText;
+            submitButton.classList.remove('loading');
             alert('Please provide the tariff dataset in JSON format.');
             return;
         }
         try {
             JSON.parse(tariffsJsonRaw);
         } catch (error) {
+            // Reset button state on validation error
+            submitButton.disabled = false;
+            submitButton.innerHTML = originalButtonText;
+            submitButton.classList.remove('loading');
             alert('Invalid tariff JSON. Please ensure it is valid JSON.');
             return;
         }
@@ -213,11 +323,19 @@ async function handleClaimSubmit(e) {
         const data = await response.json();
         
         if (response.ok || response.status === 202) {
-            // Realtime updates will arrive via Socket.IO; no further action needed here
+            // Realtime updates will arrive via Socket.IO; button will be re-enabled on completion/error
         } else {
+            // Reset button state on API error
+            submitButton.disabled = false;
+            submitButton.innerHTML = originalButtonText;
+            submitButton.classList.remove('loading');
             alert('Error: ' + data.error);
         }
     } catch (error) {
+        // Reset button state on network error
+        submitButton.disabled = false;
+        submitButton.innerHTML = originalButtonText;
+        submitButton.classList.remove('loading');
         alert('Error: ' + error.message);
     }
 }
@@ -241,28 +359,51 @@ function updateProgress(data) {
     
     progressMessages.insertBefore(messageDiv, progressMessages.firstChild);
     
+    // CRITICAL: Always display result if present - this ensures data is shown
     if (data.result) {
+        console.log('Result received in progress update, displaying...');
         displayResults(data.result);
+    }
+    
+    // Log final status for debugging
+    if (data.step === 'completed' || data.step === 'error') {
+        console.log('Final processing status:', {
+            step: data.step,
+            hasResult: !!data.result,
+            resultKeys: data.result ? Object.keys(data.result) : [],
+            message: data.message
+        });
     }
 }
 
 function displayResults(result) {
     const resultsSection = document.getElementById('results-section');
     const resultsContent = document.getElementById('results-content');
+    const jsonContent = document.getElementById('json-content');
     
     resultsSection.style.display = 'block';
     resultsContent.innerHTML = renderFinalReport(result);
+    
+    // Display formatted JSON
+    if (jsonContent) {
+        jsonContent.textContent = JSON.stringify(result, null, 2);
+    }
 }
 
 function displayFullResults(claimData) {
     const resultsSection = document.getElementById('results-section');
     const resultsContent = document.getElementById('results-content');
+    const jsonContent = document.getElementById('json-content');
     
     resultsSection.style.display = 'block';
     const finalReport = claimData.results?.final_report || null;
     
     if (finalReport) {
         resultsContent.innerHTML = renderFinalReport(finalReport);
+        // Display formatted JSON
+        if (jsonContent) {
+            jsonContent.textContent = JSON.stringify(finalReport, null, 2);
+        }
         return;
     }
     
@@ -319,63 +460,121 @@ function renderFinalReport(report) {
         return '<p>No final report available yet.</p>';
     }
     
-    const overallSection = renderOverallScoreCard(report.overall_score, report.metadata);
     const sections = [
+        renderCaseSummaryCard(report.case_summary),
         renderCashlessVerificationCard(report.cashless_verification),
         renderPayerCard(report.payer_details),
         renderPatientProfileCard(report.patient_profile),
         renderAdmissionCard(report.admission_and_treatment),
+        renderChecklistCard(report.supporting_documents, report.dynamic_document_requirements),
         renderPayerChecklistCard(report.payer_specific_checklist),
         renderInvoiceAnalysisCard(report.invoice_analysis),
         renderCaseRequirementsCard(report.case_specific_requirements),
         renderUnrelatedServicesCard(report.unrelated_services),
         renderDiscrepanciesCard(report.other_discrepancies),
+        renderPossibleIssuesCard(report.possible_issues),
         renderPredictiveAnalysisCard(report.predictive_analysis)
     ].filter(Boolean);
     
     return `
         <div class="report-container">
-            ${overallSection}
             <div class="report-grid">
                 ${sections.join('')}
+            </div>
+            <div class="disclaimer-note">
+                <p><strong>Note:</strong> Medverve AI is designed to enable claim processors to perform claim audits much faster and more accurately. AI can make mistakes and it is not advisable to solely rely on the AI responses.</p>
             </div>
         </div>
     `;
 }
 
-function renderOverallScoreCard(overall, metadata) {
-    if (!overall) return '';
-    const score = overall.score !== undefined && overall.score !== null ? `${overall.score}%` : 'N/A';
-    const statusClass = overall.passed ? 'status-success' : 'status-danger';
-    const statusLabel = overall.status || (overall.passed ? 'PASSED' : 'FAILED');
-    const breakdown = overall.breakdown || {};
+function renderChecklistCard(supportingDocs, dynamicDocs) {
+    const docMap = {
+        'discharge_summary_present': 'Discharge Summary',
+        'final_approval_letter_present': 'Final Approval Letter',
+        'surgery_notes_present': 'Surgery Notes',
+        'implant_sticker_present': 'Implant Sticker',
+        'implant_vendor_invoice_present': 'Implant Vendor Invoice',
+        'implant_pouch_present': 'Implant Pouch',
+        'lab_reports_present': 'Lab Reports',
+        'radiology_reports_present': 'Radiology Reports',
+        'pharmacy_bills_present': 'Pharmacy Bills'
+    };
     
-    const breakdownEntries = Object.entries(breakdown)
-        .map(([key, value]) => `<div class="score-breakdown-item"><span>${formatLabel(key)}</span><strong>${value ? value.toFixed(1) : 'N/A'}%</strong></div>`)
-        .join('');
+    const allDocs = [];
     
-    const generatedAt = metadata?.generated_at ? `<span class="meta-pill">Generated: ${formatDate(metadata.generated_at)}</span>` : '';
-    const tariffChip = metadata?.tariff_check_executed ? '<span class="meta-pill">Tariff Check Enabled</span>' : '';
-    const checklistChip = metadata?.include_payer_checklist ? '<span class="meta-pill">Payer Checklist Included</span>' : '';
+    // Add supporting documents
+    if (supportingDocs) {
+        for (const [key, value] of Object.entries(supportingDocs)) {
+            if (docMap[key]) {
+                allDocs.push({
+                    name: docMap[key],
+                    present: value,
+                    source: 'Supporting Documents'
+                });
+            }
+        }
+    }
     
-    return `
-        <div class="report-card report-card--wide">
-            <div class="report-card__header">
-                <div>
-                    <h4>12. Overall Score</h4>
-                    <div class="meta-info">
-                        ${generatedAt}
-                        ${tariffChip}
-                        ${checklistChip}
-                    </div>
+    // Add dynamic document requirements
+    if (dynamicDocs && Array.isArray(dynamicDocs)) {
+        for (const doc of dynamicDocs) {
+            if (doc.document_name) {
+                // Check if already added
+                const existing = allDocs.find(d => d.name === doc.document_name);
+                if (!existing) {
+                    allDocs.push({
+                        name: doc.document_name,
+                        present: doc.present || false,
+                        source: 'Dynamic Requirements',
+                        required: doc.required || false
+                    });
+                }
+            }
+        }
+    }
+    
+    if (allDocs.length === 0) {
+        return `
+            <div class="report-card">
+                <div class="report-card__header">
+                    <h4>5. Checklist</h4>
                 </div>
-                <div class="score-display ${statusClass}">
-                    <span class="score-value">${score}</span>
-                    <span class="score-status">${statusLabel}</span>
+                <div class="report-card__content">
+                    <p class="muted">No documents information available.</p>
                 </div>
             </div>
-            <div class="score-breakdown">
-                ${breakdownEntries || '<p class="muted">No breakdown available.</p>'}
+        `;
+    }
+    
+    const rows = allDocs.map(doc => `
+        <tr>
+            <td>${escapeHtml(doc.name)}</td>
+            <td>${renderStatusTag(formatBoolean(doc.present), doc.present ? 'success' : 'danger')}</td>
+            <td>${doc.required !== undefined ? renderStatusTag(formatBoolean(doc.required), doc.required ? 'warning' : 'info') : '-'}</td>
+            <td>${escapeHtml(doc.source) || '-'}</td>
+        </tr>
+    `).join('');
+    
+    return `
+        <div class="report-card">
+            <div class="report-card__header">
+                <h4>5. Checklist</h4>
+            </div>
+            <div class="report-card__content">
+                <div class="table-wrapper">
+                    <table class="results-table compact">
+                        <thead>
+                            <tr>
+                                <th>Document</th>
+                                <th>Present</th>
+                                <th>Required</th>
+                                <th>Source</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
             </div>
         </div>
     `;
@@ -466,7 +665,7 @@ function renderPayerCard(payer) {
                     </div>
                     <div>
                         <span class="key-label">Hospital Name</span>
-                        <span class="key-value">${escapeHtml(payer.hospital_name) || 'N/A'}</span>
+                        <span class="key-value">${escapeHtml(payer.hospital_name || hospital.hospital_name) || 'N/A'}</span>
                     </div>
                     <div>
                         <span class="key-label">Network Status</span>
@@ -627,7 +826,7 @@ function renderPayerChecklistCard(checklist) {
     return `
         <div class="report-card">
             <div class="report-card__header">
-                <h4>5. Payer Specific Checklist</h4>
+                <h4>6. Payer Specific Checklist</h4>
             </div>
             <div class="report-card__content">
                 <div class="table-wrapper">
@@ -648,6 +847,53 @@ function renderPayerChecklistCard(checklist) {
     `;
 }
 
+function renderCaseSummaryCard(caseSummary) {
+    if (!caseSummary) return '';
+    
+    const investigationsList = (caseSummary.investigations || []).map(inv => 
+        `<tr><td>${escapeHtml(inv.name)}</td><td>${formatDate(inv.date) || 'N/A'}</td></tr>`
+    ).join('');
+    
+    const proceduresList = (caseSummary.procedures || []).map(proc => 
+        `<tr><td>${escapeHtml(proc.name)}</td><td>${formatDate(proc.date) || 'N/A'}</td></tr>`
+    ).join('');
+    
+    return `
+        <div class="report-card report-card--wide">
+            <div class="report-card__header">
+                <h4>Case Summary</h4>
+            </div>
+            <div class="report-card__content">
+                <div style="margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 5px;">
+                    <p style="margin: 0; line-height: 1.6;">${escapeHtml(caseSummary.narrative || '')}</p>
+                </div>
+                ${investigationsList ? `
+                <div style="margin-top: 20px;">
+                    <h5 style="margin-bottom: 10px;">Investigations Done</h5>
+                    <table class="results-table">
+                        <thead>
+                            <tr><th>Investigation</th><th>Date</th></tr>
+                        </thead>
+                        <tbody>${investigationsList}</tbody>
+                    </table>
+                </div>
+                ` : ''}
+                ${proceduresList ? `
+                <div style="margin-top: 20px;">
+                    <h5 style="margin-bottom: 10px;">Procedures Done</h5>
+                    <table class="results-table">
+                        <thead>
+                            <tr><th>Procedure</th><th>Date</th></tr>
+                        </thead>
+                        <tbody>${proceduresList}</tbody>
+                    </table>
+                </div>
+                ` : ''}
+            </div>
+        </div>
+    `;
+}
+
 function renderInvoiceAnalysisCard(invoice) {
     if (!invoice) return '';
     const currency = invoice.currency || 'INR';
@@ -656,25 +902,93 @@ function renderInvoiceAnalysisCard(invoice) {
     const totalsStatus = totalsMatch === null ? 'status-neutral' : totalsMatch ? 'status-success' : 'status-danger';
     const totalsLabel = totalsMatch === null ? 'Insufficient Data' : totalsMatch ? 'Matches' : 'Mismatch';
     
-    const lineRows = (invoice.line_items || []).map(item => `
+    // Check if any item needs proof to determine column count
+    const hasItemsNeedingProof = (invoice.line_items || []).some(item => item.need_proof);
+    const hasInvestigativeItems = (invoice.line_items || []).some(item => item.type === 'investigative');
+    const colCount = hasItemsNeedingProof ? (hasInvestigativeItems ? 10 : 9) : (hasInvestigativeItems ? 8 : 7);
+    
+    const lineRows = (invoice.line_items || []).map(item => {
+        const needProof = item.need_proof || false;
+        const isInvestigative = item.type === 'investigative';
+        const reportEnclosed = item.report_enclosed;
+        
+        const proofColumns = needProof ? `
+            <td>${isInvestigative && reportEnclosed !== undefined ? renderStatusTag(formatBoolean(reportEnclosed), reportEnclosed ? 'success' : 'danger') : (isInvestigative ? renderStatusTag('N/A', 'neutral') : '')}</td>
+            <td>${renderStatusTag(formatBoolean(item.proof_included), item.proof_included ? 'success' : 'danger')}</td>
+            <td>${item.tariff_accurate === null ? renderStatusTag('N/A', 'neutral') : renderStatusTag(formatBoolean(item.tariff_accurate), item.tariff_accurate ? 'success' : 'danger')}</td>
+        ` : '';
+        
+        return `
         <tr>
             <td>${escapeHtml(item.item_name) || 'N/A'}</td>
-            <td>${formatDate(item.date) || 'N/A'}</td>
-            <td>${item.units !== undefined && item.units !== null ? item.units : '-'}</td>
-            <td>${formatCurrency(item.unit_price, currency)}</td>
-            <td>${formatCurrency(item.total_price, currency)}</td>
-            <td>${renderStatusTag(formatBoolean(item.need_proof), item.need_proof ? 'info' : 'neutral')}</td>
-            <td>${renderStatusTag(formatBoolean(item.proof_included), item.proof_included ? 'success' : 'danger')}</td>
-            <td>${item.proof_accurate === null ? renderStatusTag('N/A', 'neutral') : renderStatusTag(formatBoolean(item.proof_accurate), item.proof_accurate ? 'success' : 'warning')}</td>
-            <td>${item.tariff_accurate === null ? renderStatusTag('N/A', 'neutral') : renderStatusTag(formatBoolean(item.tariff_accurate), item.tariff_accurate ? 'success' : 'danger')}</td>
+            <td>${formatDate(item.date || item.date_of_service) || 'N/A'}</td>
+            <td>${item.units !== undefined && item.units !== null ? item.units : (item.units_billed !== undefined ? item.units_billed : '-')}</td>
+            <td>${formatCurrency(item.unit_price || item.cost_per_unit, currency)}</td>
+            <td>${formatCurrency(item.total_price || item.total_cost, currency)}</td>
+            <td>${escapeHtml(item.type || item.category || 'N/A')}</td>
+            <td>${renderStatusTag(formatBoolean(needProof), needProof ? 'info' : 'neutral')}</td>
+            ${proofColumns}
             <td>${escapeHtml((item.issues || []).join('; ')) || '-'}</td>
         </tr>
-    `).join('');
+        `;
+    }).join('');
+    
+    const headerRow = hasItemsNeedingProof ? (hasInvestigativeItems ? `
+        <tr>
+            <th>Item</th>
+            <th>Date</th>
+            <th>Units</th>
+            <th>Unit Price</th>
+            <th>Total</th>
+            <th>Type</th>
+            <th>Need Proof</th>
+            <th>Report Enclosed</th>
+            <th>Proof Included</th>
+            <th>Tariff Accurate</th>
+            <th>Issues</th>
+        </tr>
+    ` : `
+        <tr>
+            <th>Item</th>
+            <th>Date</th>
+            <th>Units</th>
+            <th>Unit Price</th>
+            <th>Total</th>
+            <th>Type</th>
+            <th>Need Proof</th>
+            <th>Proof Included</th>
+            <th>Tariff Accurate</th>
+            <th>Issues</th>
+        </tr>
+    `) : (hasInvestigativeItems ? `
+        <tr>
+            <th>Item</th>
+            <th>Date</th>
+            <th>Units</th>
+            <th>Unit Price</th>
+            <th>Total</th>
+            <th>Type</th>
+            <th>Need Proof</th>
+            <th>Report Enclosed</th>
+            <th>Issues</th>
+        </tr>
+    ` : `
+        <tr>
+            <th>Item</th>
+            <th>Date</th>
+            <th>Units</th>
+            <th>Unit Price</th>
+            <th>Total</th>
+            <th>Type</th>
+            <th>Need Proof</th>
+            <th>Issues</th>
+        </tr>
+    `);
     
     return `
         <div class="report-card report-card--wide">
             <div class="report-card__header">
-                <h4>6. Invoice Line Items & 7. Financial Reconciliation</h4>
+                <h4>7. Invoice Line Items & Financial Reconciliation</h4>
                 <span class="status-chip ${totalsStatus}">${totalsLabel}</span>
             </div>
             <div class="report-card__content">
@@ -703,21 +1017,10 @@ function renderInvoiceAnalysisCard(invoice) {
                 <div class="table-wrapper">
                     <table class="results-table compact">
                         <thead>
-                            <tr>
-                                <th>Item</th>
-                                <th>Date</th>
-                                <th>Units</th>
-                                <th>Unit Price</th>
-                                <th>Total</th>
-                                <th>Need Proof</th>
-                                <th>Proof Included</th>
-                                <th>Proof Accurate</th>
-                                <th>Tariff Accurate</th>
-                                <th>Issues</th>
-                            </tr>
+                            ${headerRow}
                         </thead>
                         <tbody>
-                            ${lineRows || '<tr><td colspan="10" class="muted">No line items found.</td></tr>'}
+                            ${lineRows || `<tr><td colspan="${colCount}" class="muted">No line items found.</td></tr>`}
                         </tbody>
                     </table>
                 </div>
@@ -833,14 +1136,64 @@ function renderDiscrepanciesCard(discrepancies) {
     `;
 }
 
+function renderPossibleIssuesCard(possibleIssues) {
+    if (!possibleIssues || possibleIssues.length === 0) {
+        return `
+            <div class="report-card">
+                <div class="report-card__header">
+                    <h4>11. Possible Issues</h4>
+                    <span class="status-chip status-success">No Issues</span>
+                </div>
+                <div class="report-card__content">
+                    <p class="muted">No potential issues detected.</p>
+                </div>
+            </div>
+        `;
+    }
+    
+    const rows = possibleIssues.map(item => `
+        <tr>
+            <td>${escapeHtml(item.issue_type) || 'N/A'}</td>
+            <td>${renderStatusTag(item.severity || 'Medium', severityToStatus(item.severity))}</td>
+            <td>${escapeHtml(item.description) || '-'}</td>
+            <td>${escapeHtml(item.potential_query) || '-'}</td>
+            <td>${escapeHtml(item.recommendation) || '-'}</td>
+        </tr>
+    `).join('');
+    
+    return `
+        <div class="report-card report-card--wide">
+            <div class="report-card__header">
+                <h4>11. Possible Issues</h4>
+                <span class="status-chip status-warning">${possibleIssues.length} Issue(s)</span>
+            </div>
+            <div class="report-card__content">
+                <div class="table-wrapper">
+                    <table class="results-table compact">
+                        <thead>
+                            <tr>
+                                <th>Issue Type</th>
+                                <th>Severity</th>
+                                <th>Description</th>
+                                <th>Potential Query</th>
+                                <th>Recommendation</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 function renderPredictiveAnalysisCard(analysis) {
     if (!analysis) return '';
     const riskStatus = severityToStatus(analysis.overall_risk_level);
     const queries = (analysis.possible_queries || []).map(query => `
         <li>
             <strong>Query:</strong> ${escapeHtml(query.question)}<br>
-            <strong>Trigger:</strong> ${escapeHtml(query.trigger) || 'N/A'}<br>
-            <strong>Suggested Response:</strong> ${escapeHtml(query.recommended_response) || 'N/A'}
+            <strong>Trigger:</strong> ${escapeHtml(query.trigger) || 'N/A'}
         </li>
     `).join('');
     
@@ -848,7 +1201,7 @@ function renderPredictiveAnalysisCard(analysis) {
     const mitigations = (analysis.mitigation_recommendations || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
     
     return `
-        <div class="report-card">
+        <div class="report-card report-card--wide">
             <div class="report-card__header">
                 <h4>11. Predictive Payer Queries</h4>
                 <span class="status-chip ${riskStatus}">${escapeHtml(analysis.overall_risk_level || 'Medium')} Risk</span>
@@ -872,6 +1225,8 @@ function renderPredictiveAnalysisCard(analysis) {
 }
 
 function formatCurrency(value, currency = 'INR') {
+    // Ensure currency is always INR, not USD or dollar
+    currency = 'INR';
     if (value === null || value === undefined || isNaN(Number(value))) {
         return 'N/A';
     }
@@ -883,7 +1238,8 @@ function formatCurrency(value, currency = 'INR') {
         }).format(Number(value));
     } catch (error) {
         const amount = Number(value).toFixed(2);
-        return `${currency || 'INR'} ${amount}`;
+        // Always use INR, never USD or dollar
+        return `₹ ${amount}`;
     }
 }
 

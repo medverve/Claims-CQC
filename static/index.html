@@ -132,7 +132,16 @@
                     </div>
                     <div class="results-section" id="results-section" style="display: none;">
                         <h3>Results</h3>
-                        <div id="results-content"></div>
+                        <div class="results-tabs">
+                            <button class="tab-btn active" data-tab="report">Report View</button>
+                            <button class="tab-btn" data-tab="json">JSON Response</button>
+                        </div>
+                        <div class="tab-content active" id="tab-report">
+                            <div id="results-content"></div>
+                        </div>
+                        <div class="tab-content" id="tab-json">
+                            <pre id="json-content" class="json-display"></pre>
+                        </div>
                     </div>
                 </div>
             </div>

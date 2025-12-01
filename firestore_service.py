@@ -3,6 +3,7 @@ from datetime import datetime, date, timezone
 from typing import Optional, Dict, Any, List
 
 from google.cloud import firestore
+from google.cloud.firestore import FieldFilter
 from google.oauth2 import service_account
 
 from config import Config
@@ -23,7 +24,7 @@ class FirestoreService:
 
     # ---------------------- Users ----------------------
     def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
-        docs = self.client.collection('users').where('username', '==', username).limit(1).stream()
+        docs = self.client.collection('users').where(filter=FieldFilter('username', '==', username)).limit(1).stream()
         for doc in docs:
             data = doc.to_dict()
             data['id'] = doc.id
@@ -31,7 +32,7 @@ class FirestoreService:
         return None
 
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
-        docs = self.client.collection('users').where('email', '==', email).limit(1).stream()
+        docs = self.client.collection('users').where(filter=FieldFilter('email', '==', email)).limit(1).stream()
         for doc in docs:
             data = doc.to_dict()
             data['id'] = doc.id
@@ -77,7 +78,7 @@ class FirestoreService:
         return doc_ref.id
 
     def list_api_keys(self, user_id: str) -> List[Dict[str, Any]]:
-        docs = self.client.collection('api_keys').where('user_id', '==', user_id).stream()
+        docs = self.client.collection('api_keys').where(filter=FieldFilter('user_id', '==', user_id)).stream()
         keys = []
         for doc in docs:
             data = doc.to_dict()
@@ -108,7 +109,7 @@ class FirestoreService:
         return None
 
     def find_api_key_by_hash(self, key_hash: str) -> Optional[Dict[str, Any]]:
-        docs = self.client.collection('api_keys').where('key_hash', '==', key_hash).where('is_active', '==', True).limit(1).stream()
+        docs = self.client.collection('api_keys').where(filter=FieldFilter('key_hash', '==', key_hash)).where(filter=FieldFilter('is_active', '==', True)).limit(1).stream()
         for doc in docs:
             data = doc.to_dict()
             data['id'] = doc.id

@@ -204,6 +204,80 @@ body {
     grid-column: 1 / -1;
 }
 
+/* Results Tabs */
+.results-tabs {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+    border-bottom: 2px solid #e0e0e0;
+}
+
+.tab-btn {
+    padding: 12px 24px;
+    background: transparent;
+    border: none;
+    border-bottom: 3px solid transparent;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    color: #666;
+    transition: all 0.3s ease;
+    font-family: 'Source Sans Pro', sans-serif;
+}
+
+.tab-btn:hover {
+    color: #81c784;
+    background: #f5f5f5;
+}
+
+.tab-btn.active {
+    color: #81c784;
+    border-bottom-color: #81c784;
+    background: #f9f9f9;
+}
+
+.tab-content {
+    display: none;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+.json-display {
+    background: #2d2d2d;
+    color: #f8f8f2;
+    padding: 20px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    max-height: 600px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.json-display::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+.json-display::-webkit-scrollbar-track {
+    background: #1e1e1e;
+    border-radius: 5px;
+}
+
+.json-display::-webkit-scrollbar-thumb {
+    background: #555;
+    border-radius: 5px;
+}
+
+.json-display::-webkit-scrollbar-thumb:hover {
+    background: #777;
+}
+
 .form-group {
     margin-bottom: 20px;
 }
@@ -264,10 +338,42 @@ body {
     font-weight: 600;
     transition: background 0.2s;
     font-family: 'Source Sans Pro', sans-serif;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
     background: #4caf50;
+}
+
+.btn-primary:disabled {
+    background: #95a5a6;
+    cursor: not-allowed;
+    opacity: 0.7;
+}
+
+.btn-primary.loading {
+    pointer-events: none;
+}
+
+/* Spinner animation */
+.spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-radius: 50%;
+    border-top-color: white;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .btn-secondary {
@@ -1063,5 +1169,23 @@ table tr:hover {
     .api-keys-wrapper {
         grid-template-columns: 1fr;
     }
+}
+
+.disclaimer-note {
+    background: transparent !important;
+    border: none !important;
+    padding: 16px 20px;
+    margin-top: 24px;
+    color: #666;
+}
+
+.disclaimer-note p {
+    margin: 0;
+    line-height: 1.6;
+    font-style: italic;
+}
+
+.disclaimer-note strong {
+    color: #666;
 }
 

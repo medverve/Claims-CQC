@@ -5,7 +5,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from firestore_service import firestore_service
 from config import Config
-from document_processor import DocumentProcessor
+# DocumentProcessor removed - documents are uploaded directly to Gemini Vision API
 from quality_checks import QualityChecker
 import os
 import json
@@ -14,6 +14,7 @@ import hashlib
 import secrets
 from datetime import datetime, date, timezone, timedelta
 from functools import wraps
+from typing import Dict, Any
 import threading
 
 app = Flask(__name__, static_folder='static', static_url_path='')
@@ -33,7 +34,7 @@ os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
 os.makedirs('static', exist_ok=True)
 
 # Initialize services (lazy initialization for Gemini)
-doc_processor = DocumentProcessor()
+# DocumentProcessor not needed - files uploaded directly to Gemini Vision API
 quality_checker = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -350,8 +351,9 @@ def manage_api_keys():
 
 def process_claim_async(claim_id, documents_data, session_id, ignore_discrepancies=False, include_payer_checklist=True):
     """Process claim in background thread"""
-    try:
-        with app.app_context():
+    # Ensure we're in the right room for Socket.IO
+    with app.app_context():
+        try:
             claim = firestore_service.get_claim(claim_id)
             if not claim:
                 return
@@ -366,60 +368,186 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
                 'progress': 0
             }, room=session_id)
             
-            # Step 1: Extract document data
+            # Step 1: Analyze documents using parallel focused prompts for faster processing
             socketio.emit('progress', {
-                'step': 'extracting',
-                'message': 'Extracting data from documents...',
+                'step': 'analyzing',
+                'message': 'Starting parallel document analysis...',
                 'progress': 10
             }, room=session_id)
             
-            extracted_data = {}
-            for doc_type, doc_info in documents_data.items():
-                if doc_info.get('file_path'):
-                    processed = doc_processor.process_document(
-                        doc_info['file_path'],
-                        doc_info.get('file_type', 'pdf')
-                    )
-                    extracted_data[doc_type] = processed
-            
-            # Step 2: Analyze documents with Gemini
-            socketio.emit('progress', {
-                'step': 'analyzing',
-                'message': 'Analyzing documents with AI...',
-                'progress': 30
-            }, room=session_id)
-            
-            analyzed_data = {}
             checker = get_quality_checker()
-            # Analyze all documents and try to identify their type from content
-            for doc_key, doc_data in extracted_data.items():
-                if doc_data.get('text'):
-                    # Let Gemini identify document type from content
-                    analyzed = checker.gemini.analyze_document(doc_data['text'], "health_claim")
-                    # Store with a generic key, we'll categorize later
-                    analyzed_data[doc_key] = analyzed
+            # Collect all file paths
+            all_file_paths = []
+            doc_key_to_path = {}
+            for doc_key, doc_info in documents_data.items():
+                if doc_info.get('file_path'):
+                    file_path = doc_info['file_path']
+                    all_file_paths.append(file_path)
+                    doc_key_to_path[file_path] = doc_key
             
-            # Try to categorize documents based on content
-            # Look for keywords to identify document types
-            categorized_data = {'insurer': {}, 'approval': {}, 'hospital': {}}
-            for doc_key, data in analyzed_data.items():
-                content_str = json.dumps(data).lower()
-                if any(keyword in content_str for keyword in ['insurer', 'insurance', 'policy', 'coverage']):
-                    if not categorized_data['insurer']:
-                        categorized_data['insurer'] = data
-                elif any(keyword in content_str for keyword in ['approval', 'authorization', 'pre-auth', 'approved']):
-                    if not categorized_data['approval']:
-                        categorized_data['approval'] = data
-                elif any(keyword in content_str for keyword in ['hospital', 'invoice', 'bill', 'line item', 'charge']):
-                    if not categorized_data['hospital']:
-                        categorized_data['hospital'] = data
-                else:
-                    # If can't categorize, assign to hospital as default
-                    if not categorized_data['hospital']:
-                        categorized_data['hospital'] = data
+            # Analyze documents using sequential structured approach
+            if all_file_paths:
+                print(f"\n=== CALLING GEMINI AI FOR SEQUENTIAL DOCUMENT ANALYSIS ===")
+                print(f"Files to analyze: {len(all_file_paths)}")
+                for fp in all_file_paths:
+                    print(f"  - {fp}")
+                
+                # Progress callback to emit updates as each step completes
+                def emit_progress(step_name, message):
+                    step_messages = {
+                        'classify': 'Classifying documents...',
+                        'clinical': 'Analyzing discharge summary and clinical documents...',
+                        'invoice': 'Analyzing invoices...',
+                        'reports': 'Assessing reports and images...',
+                        'approval': 'Verifying approval/referral/authorization letter...',
+                        'requirements': 'Analyzing case-specific requirements...',
+                        'final': 'Generating comprehensive report...'
+                    }
+                    step_weights = {
+                        'classify': 10,
+                        'clinical': 20,
+                        'invoice': 30,
+                        'reports': 40,
+                        'approval': 50,
+                        'requirements': 60,
+                        'final': 70
+                    }
+                    progress_pct = step_weights.get(step_name, 10)
+                    socketio.emit('progress', {
+                        'step': step_name,
+                        'message': step_messages.get(step_name, message),
+                        'progress': progress_pct
+                    }, room=session_id)
+                
+                comprehensive_analysis = checker.gemini.analyze_claim_sequential(all_file_paths, progress_callback=emit_progress)
+                
+                print(f"\n=== SEQUENTIAL AI ANALYSIS RESULT RECEIVED ===")
+                print(f"Type: {type(comprehensive_analysis).__name__}")
+                if isinstance(comprehensive_analysis, dict):
+                    print(f"Keys in result: {list(comprehensive_analysis.keys())}")
+                    # Show sample of extracted data
+                    patient = comprehensive_analysis.get('patient_information', {})
+                    payer = comprehensive_analysis.get('payer_information', {})
+                    hospital = comprehensive_analysis.get('hospital_information', {})
+                    line_items = comprehensive_analysis.get('line_items', [])
+                    print(f"Patient name: {patient.get('patient_name', 'N/A')}")
+                    print(f"Payer name: {payer.get('payer_name', 'N/A')}")
+                    print(f"Hospital name: {hospital.get('hospital_name', 'N/A')}")
+                    print(f"Line items count: {len(line_items)}")
+                print(f"=== END SEQUENTIAL AI ANALYSIS RESULT ===\n")
+                
+                # Emit completion of analysis phase
+                socketio.emit('progress', {
+                    'step': 'analyzing',
+                    'message': 'Document analysis complete!',
+                    'progress': 75
+                }, room=session_id)
+            else:
+                comprehensive_analysis = {}
             
-            # Use categorized data for checks
-            analyzed_data = categorized_data
+            # Convert sequential analysis results to expected structure for compatibility
+            sequential_result = comprehensive_analysis
+            
+            print(f"\n=== ORGANIZING SEQUENTIAL ANALYSIS RESULTS ===")
+            print(f"Has sequential_result: {bool(sequential_result)}")
+            print(f"=== END CHECK ===\n")
+            
+            # Convert new structure to old structure for compatibility with existing quality checks
+            merged_data = {
+                'insurer': {},
+                'approval': {},
+                'hospital': {}
+            }
+            
+            # Extract data from sequential result
+            patient_info = sequential_result.get('patient_information', {})
+            payer_info = sequential_result.get('payer_information', {})
+            hospital_info = sequential_result.get('hospital_information', {})
+            case_summary = sequential_result.get('case_summary', {})
+            line_items = sequential_result.get('line_items', [])
+            
+            # Build financial summary from line items
+            total_claimed = sum(item.get('total_cost', 0) for item in line_items)
+            financial_summary = {
+                'total_claimed_amount': total_claimed,
+                'total_approved_amount': payer_info.get('approved_amount', 0),
+                'line_items': line_items,
+                'currency': 'INR',
+                'invoice_number': None,
+                'invoice_date': None
+            }
+            
+            # Build clinical summary from case summary
+            clinical_summary = {
+                'primary_diagnosis': case_summary.get('primary_diagnosis', []),
+                'procedures_performed': [p.get('procedure_name') for p in case_summary.get('procedures_performed', [])],
+                'investigations': [i.get('investigation_name') for i in case_summary.get('investigations_done', [])],
+                'surgery_performed': any('surgery' in p.get('procedure_name', '').lower() for p in case_summary.get('procedures_performed', [])),
+                'implants_used': False  # Will be determined from line items
+            }
+            
+            # Build claim information
+            claim_information = {
+                'admission_details': {
+                    'admission_date': case_summary.get('admission_date'),
+                    'discharge_date': case_summary.get('discharge_date'),
+                    'length_of_stay_days': case_summary.get('length_of_stay_days')
+                },
+                'treating_doctor': case_summary.get('treating_doctor'),
+                'speciality': case_summary.get('speciality')
+            }
+            
+            # Check for approval
+            approval_found = payer_info.get('approval_found', False)
+            
+            # Organize data into categories
+            if approval_found:
+                merged_data['approval'] = {
+                    'cashless_assessment': {
+                        'has_final_or_discharge_approval': True,
+                        'approval_stage': payer_info.get('approval_type', 'None'),
+                        'payer_type': payer_info.get('payer_type', 'Unknown'),
+                        'payer_name': payer_info.get('payer_name'),
+                        'approval_reference': payer_info.get('approval_reference'),
+                        'approval_date': payer_info.get('approval_date')
+                    },
+                    'payer_details': payer_info
+                }
+            else:
+                merged_data['approval'] = {
+                    'approval_missing': True,
+                    'cashless_assessment': {
+                        'has_final_or_discharge_approval': False,
+                        'approval_stage': 'None'
+                    }
+                }
+            
+            # Hospital data
+            merged_data['hospital'] = {
+                'hospital_details': hospital_info,
+                'financial_summary': financial_summary,
+                'clinical_summary': clinical_summary,
+                'claim_information': claim_information,
+                'supporting_documents': {},
+                'patient_details': patient_info
+            }
+            
+            # Insurer data
+            merged_data['insurer'] = {
+                'payer_details': payer_info,
+                'patient_details': patient_info
+            }
+            
+            # Add patient details to approval
+            merged_data['approval']['patient_details'] = patient_info
+            
+            analyzed_data = merged_data
+            
+            # Store sequential results for final report building
+            # Sequential result already contains all the data we need
+            sequential_results = {
+                'sequential_analysis': sequential_result
+            }
             
             # Step 3: Patient Details Check
             socketio.emit('progress', {
@@ -432,7 +560,11 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
             cashless_status = checker.evaluate_cashless_status(analyzed_data)
             firestore_service.add_claim_result(claim_id, 'cashless_verification', cashless_status)
             
-            if not cashless_status.get('is_cashless'):
+            # Check if approval is missing - if so, continue processing but with warning
+            approval_doc = analyzed_data.get('approval', {})
+            # REMOVED: Cashless validation - all claims are treated as cashless
+            # No need to check is_cashless anymore - always proceed with processing
+            if False:  # Always skip this validation
                 invalid_report = {
                     'version': '2025.11.13',
                     'metadata': {
@@ -447,8 +579,8 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
                         'status': 'INVALID',
                         'reason': cashless_status.get('reason')
                     },
-                    'message': 'Invalid document: not a cashless health claim.',
-                    'frontend_assets': get_frontend_assets()
+                    'message': 'Invalid document: not a cashless health claim.'
+                    # Do NOT add frontend_assets to frontend responses - only for external API consumers
                 }
                 
                 firestore_service.update_claim(claim_id, {
@@ -494,8 +626,33 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
                 'progress': 50
             }, room=session_id)
             
-            line_items = analyzed_data.get('hospital', {}).get('line_items', [])
-            approval_dates = analyzed_data.get('approval', {}).get('approval_dates', {})
+            # Extract line items from hospital document - check multiple locations
+            hospital_doc = analyzed_data.get('hospital', {})
+            line_items = []
+            
+            # Check financial_summary.line_items first
+            financial_summary = hospital_doc.get('financial_summary', {})
+            if financial_summary and financial_summary.get('line_items'):
+                line_items = financial_summary.get('line_items', [])
+            
+            # If not found, check hospital.line_items
+            if not line_items and hospital_doc.get('line_items'):
+                line_items = hospital_doc.get('line_items', [])
+            
+            # Log for debugging
+            print(f"\n=== LINE ITEMS EXTRACTION ===")
+            print(f"Found {len(line_items)} line items")
+            if line_items:
+                print(f"Sample line item: {json.dumps(line_items[0] if line_items else {}, indent=2)}")
+            print(f"=== END LINE ITEMS ===\n")
+            
+            # Get approval dates if approval exists, otherwise use empty dict
+            approval_doc = analyzed_data.get('approval', {})
+            if approval_doc.get('approval_missing') or not approval_doc:
+                approval_dates = {}
+            else:
+                approval_dates = approval_doc.get('approval_dates', {}) or {}
+            
             date_result = checker.check_dates(line_items, approval_dates)
             firestore_service.add_claim_result(claim_id, 'dates', date_result)
             
@@ -512,15 +669,40 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
             firestore_service.add_claim_result(claim_id, 'reports', report_result)
             
             # Step 6: Comprehensive Checklists and Validation
-            socketio.emit('progress', {
-                'step': 'comprehensive_check',
-                'message': 'Generating comprehensive checklists, verifying codes, and matching approval with treatment...',
-                'progress': 70
-            }, room=session_id)
-            
-            payer_requirements = analyzed_data.get('approval', {}).get('payer_requirements', {})
-            line_item_result = checker.check_line_items(line_items, analyzed_data, payer_requirements, include_payer_checklist_flag)
-            firestore_service.add_claim_result(claim_id, 'comprehensive_checklist', line_item_result)
+            # Skip old comprehensive checklist if using sequential analysis
+            if 'sequential_results' in locals():
+                # Sequential analysis already generated checklist, skip old method
+                line_item_result = {
+                    'type': 'comprehensive_checklist',
+                    'payer_specific_checklist': [],
+                    'case_specific_checklist': sequential_result.get('case_specific_checklist', []),
+                    'all_discrepancies': sequential_result.get('discrepancies', []),
+                    'approval_treatment_match': {},
+                    'dynamic_document_requirements': [],
+                    'investigation_discrepancies': [],
+                    'code_verification': {},
+                    'total_items': len(line_items)
+                }
+                firestore_service.add_claim_result(claim_id, 'comprehensive_checklist', line_item_result)
+            else:
+                socketio.emit('progress', {
+                    'step': 'comprehensive_check',
+                    'message': 'Generating comprehensive checklists, verifying codes, and matching approval with treatment...',
+                    'progress': 70
+                }, room=session_id)
+                
+                # Check if approval document is missing
+                approval_doc = analyzed_data.get('approval', {})
+                if approval_doc.get('approval_missing') or not approval_doc.get('cashless_assessment', {}).get('has_final_or_discharge_approval'):
+                    # Approval not found - continue processing but flag it
+                    socketio.emit('warning', {
+                        'message': 'Approval/Authorization/Referral letter not detected in uploaded documents. Analysis will continue, but please ensure approval letter is uploaded for complete validation.',
+                        'type': 'missing_approval'
+                    }, room=session_id)
+                
+                payer_requirements = approval_doc.get('payer_requirements', {})
+                line_item_result = checker.check_line_items(line_items, analyzed_data, payer_requirements, include_payer_checklist_flag)
+                firestore_service.add_claim_result(claim_id, 'comprehensive_checklist', line_item_result)
             
             # Step 7: Tariff Check (optional)
             tariffs_payload = claim.get('tariffs_data') or []
@@ -544,25 +726,51 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
                 'progress': 90
             }, room=session_id)
             
-            all_results = [patient_result, date_result, report_result, line_item_result]
-            if tariff_result is not None:
-                all_results.append(tariff_result)
+            # Use sequential results to build final report directly
+            if 'sequential_results' in locals():
+                # Build report from sequential analysis
+                final_report = checker.build_final_report_from_sequential(
+                    sequential_results,
+                    cashless_status,
+                    include_payer_checklist_flag
+                )
+                
+                # Calculate score from discrepancies - get from sequential_analysis
+                seq_data = sequential_results.get('sequential_analysis', {})
+                total_issues = len(seq_data.get('discrepancies', [])) + len(seq_data.get('possible_issues', []))
+                accuracy_score = max(0, 100 - (total_issues * 5))  # Rough scoring
+                final_score = {
+                    'accuracy_score': accuracy_score,
+                    'passed': accuracy_score >= 80,
+                    'status': 'PASSED' if accuracy_score >= 80 else 'FAILED',
+                    'threshold': 80,
+                    'breakdown': {}
+                }
+            else:
+                # Fallback to old method if sequential results not available
+                all_results = [patient_result, date_result, report_result, line_item_result]
+                if tariff_result is not None:
+                    all_results.append(tariff_result)
+                
+                final_score = checker.calculate_accuracy_score(all_results, ignore_discrepancies_flag)
+                
+                final_report = checker.build_final_report(
+                    analyzed_data,
+                    cashless_status,
+                    patient_result,
+                    date_result,
+                    report_result,
+                    line_item_result,
+                    tariff_result,
+                    final_score,
+                    include_payer_checklist_flag,
+                    ignore_discrepancies_flag
+                )
+            # Do NOT add frontend_assets to frontend responses - only for external API consumers
+            # final_report['frontend_assets'] = get_frontend_assets()
             
-            final_score = checker.calculate_accuracy_score(all_results, ignore_discrepancies_flag)
-            
-            final_report = checker.build_final_report(
-                analyzed_data,
-                cashless_status,
-                patient_result,
-                date_result,
-                report_result,
-                line_item_result,
-                tariff_result,
-                final_score,
-                include_payer_checklist_flag,
-                ignore_discrepancies_flag
-            )
-            final_report['frontend_assets'] = get_frontend_assets()
+            # Include the raw analyzed_data in the final report so frontend can access all extracted fields
+            final_report['extracted_data'] = analyzed_data
             
             firestore_service.update_claim(claim_id, {
                 'accuracy_score': final_score['accuracy_score'],
@@ -571,9 +779,10 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
                 'completed_at': datetime.now(timezone.utc).isoformat()
             })
             
-            # Save final result
+            # Save final result - also save analyzed_data separately for easy access
             firestore_service.add_claim_result(claim_id, 'final_score', final_score)
             firestore_service.add_claim_result(claim_id, 'final_report', final_report)
+            firestore_service.add_claim_result(claim_id, 'analyzed_data', analyzed_data)
 
             # Delete uploaded files after processing
             for doc_info in documents_data.values():
@@ -584,20 +793,107 @@ def process_claim_async(claim_id, documents_data, session_id, ignore_discrepanci
                     except OSError:
                         pass
             
+            # CRITICAL: Always emit result with status - frontend needs this
+            print(f"\n=== EMITTING FINAL RESULT VIA SOCKET.IO ===")
+            print(f"Status: completed")
+            print(f"Has result: {final_report is not None}")
+            print(f"Result keys: {list(final_report.keys()) if final_report else 'None'}")
+            print(f"Session ID: {session_id}")
+            print(f"=== END ===\n")
+            
+            # Emit progress with result
             socketio.emit('progress', {
                 'step': 'completed',
                 'message': f"Processing complete! Accuracy: {final_score['accuracy_score']}% - {'PASSED' if final_score['passed'] else 'FAILED'}",
                 'progress': 100,
+                'result': final_report,
+                'status': 'completed',
+                'claim_id': claim_id
+            }, room=session_id)
+            
+            # Also emit a separate 'result' event to ensure frontend receives it
+            socketio.emit('result', {
+                'status': 'completed',
+                'claim_id': claim_id,
                 'result': final_report
             }, room=session_id)
             
-    except Exception as e:
-        socketio.emit('error', {
-            'message': f'Error processing claim: {str(e)}'
-        }, room=session_id)
-        with app.app_context():
-            if firestore_service.get_claim(claim_id):
-                firestore_service.update_claim(claim_id, {'status': 'failed'})
+            print(f"Result emitted to room: {session_id}")
+            
+        except Exception as e:
+            import traceback
+            error_message = str(e)
+            error_traceback = traceback.format_exc()
+            print(f"\n=== ERROR IN CLAIM PROCESSING ===")
+            print(f"Error: {error_message}")
+            print(f"Traceback: {error_traceback}")
+            print(f"=== END ERROR ===\n")
+            
+            # Always emit error result so frontend knows what happened
+            error_result = {
+                'version': '2025.11.13',
+                'metadata': {
+                    'generated_at': datetime.now(timezone.utc).isoformat(),
+                    'status': 'error',
+                    'error_message': error_message
+                },
+                'overall_score': {
+                    'score': 0.0,
+                    'passed': False,
+                    'status': 'ERROR',
+                    'reason': f'Processing failed: {error_message}'
+                },
+                'message': f'Error processing claim: {error_message}',
+                'error': True,
+                'extracted_data': analyzed_data if 'analyzed_data' in locals() else {}
+                # Do NOT add frontend_assets to frontend responses - only for external API consumers
+            }
+            
+            # Save error result to Firestore
+            try:
+                firestore_service.update_claim(claim_id, {
+                    'status': 'failed',
+                    'completed_at': datetime.now(timezone.utc).isoformat()
+                })
+                firestore_service.add_claim_result(claim_id, 'final_report', error_result)
+                if 'analyzed_data' in locals():
+                    firestore_service.add_claim_result(claim_id, 'analyzed_data', analyzed_data)
+            except Exception as save_error:
+                print(f"Error saving to Firestore: {save_error}")
+            
+            # CRITICAL: Emit error via Socket.IO - ALWAYS send result so frontend knows status
+            print(f"\n=== EMITTING ERROR RESULT VIA SOCKET.IO ===")
+            print(f"Status: error")
+            print(f"Has result: {error_result is not None}")
+            print(f"Session ID: {session_id}")
+            print(f"=== END ===\n")
+            
+            socketio.emit('progress', {
+                'step': 'error',
+                'message': f'Error processing claim: {error_message}',
+                'progress': 100,
+                'result': error_result,
+                'error': True,
+                'status': 'error',
+                'claim_id': claim_id
+            }, room=session_id)
+            
+            # Also emit as separate result event
+            socketio.emit('result', {
+                'status': 'error',
+                'claim_id': claim_id,
+                'result': error_result
+            }, room=session_id)
+            
+            # Also emit as error event
+            socketio.emit('error', {
+                'message': error_message,
+                'result': error_result
+            }, room=session_id)
+            
+            print(f"Error result emitted to room: {session_id}")
+            
+            # Clean up files
             for doc_info in documents_data.values():
                 file_path = doc_info.get('file_path')
                 if file_path and os.path.exists(file_path):
@@ -733,8 +1029,14 @@ def get_claim(claim_id):
     results = firestore_service.get_claim_results(claim_id)
 
     final_report = results.get('final_report')
-    if isinstance(final_report, dict) and 'frontend_assets' not in final_report:
-        final_report['frontend_assets'] = get_frontend_assets()
+    # Do NOT add frontend_assets to frontend responses - only for external API consumers
+    # if isinstance(final_report, dict) and 'frontend_assets' not in final_report:
+    #     final_report['frontend_assets'] = get_frontend_assets()
+    
+    # Ensure analyzed_data is included in response - this contains all AI-extracted fields
+    analyzed_data = results.get('analyzed_data', {})
+    if analyzed_data and isinstance(final_report, dict):
+        final_report['extracted_data'] = analyzed_data
 
     return jsonify({
         'claim_id': claim.get('id'),
@@ -744,7 +1046,8 @@ def get_claim(claim_id):
         'passed': claim.get('passed'),
         'created_at': claim.get('created_at'),
         'completed_at': claim.get('completed_at'),
-        'results': results
+        'results': results,
+        'analyzed_data': analyzed_data  # Include raw AI analysis data with all extracted fields
     })
 
 @app.route('/api/claims', methods=['GET'])
