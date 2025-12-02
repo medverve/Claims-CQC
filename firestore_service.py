@@ -9,6 +9,7 @@ from google.cloud.firestore import FieldFilter
 from google.oauth2 import service_account
 from google.api_core import retry, timeout
 from google.api_core.exceptions import DeadlineExceeded, RetryError
+from google.api_core.retry import Retry
 
 from config import Config
 
@@ -16,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 # Thread pool for timeout-wrapped queries
 _query_executor = ThreadPoolExecutor(max_workers=5)
+
+# Custom timeout for Firestore queries (10 seconds)
+_QUERY_TIMEOUT = 10.0
 
 
 class FirestoreService:
@@ -36,24 +40,32 @@ class FirestoreService:
     # ---------------------- Users ----------------------
     def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
         def _query():
-            query = self.client.collection('users').where(filter=FieldFilter('username', '==', username)).limit(1)
-            docs = list(query.stream())  # Convert to list to execute query
-            for doc in docs:
-                data = doc.to_dict()
-                data['id'] = doc.id
-                return data
-            return None
+            try:
+                query = self.client.collection('users').where(filter=FieldFilter('username', '==', username)).limit(1)
+                # Iterate with limit to avoid waiting for all results
+                for doc in query.stream():
+                    data = doc.to_dict()
+                    data['id'] = doc.id
+                    return data
+                return None
+            except (DeadlineExceeded, RetryError) as e:
+                logger.warning(f"Firestore query timeout for username '{username}': {e}")
+                return None
+            except Exception as e:
+                logger.warning(f"Firestore query error for username '{username}': {e}")
+                return None
         
         try:
-            # Use a 10-second timeout for queries to avoid blocking
+            # Use ThreadPoolExecutor with timeout to prevent blocking
+            # Note: This cancels the future but Firestore query may continue in background
+            # The important thing is it doesn't block the calling thread
             future = _query_executor.submit(_query)
-            result = future.result(timeout=10)
+            result = future.result(timeout=_QUERY_TIMEOUT)
             return result
         except FutureTimeoutError:
-            logger.warning(f"Query timeout while getting user by username '{username}' (10s limit)")
-            return None
-        except (DeadlineExceeded, RetryError) as e:
-            logger.warning(f"Timeout or retry error while getting user by username '{username}': {e}")
+            # Cancel the future to free resources
+            future.cancel()
+            logger.warning(f"Query executor timeout while getting user by username '{username}' (cancelled after {_QUERY_TIMEOUT}s)")
             return None
         except Exception as e:
             logger.error(f"Error getting user by username '{username}': {e}")
@@ -61,24 +73,32 @@ class FirestoreService:
 
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         def _query():
-            query = self.client.collection('users').where(filter=FieldFilter('email', '==', email)).limit(1)
-            docs = list(query.stream())  # Convert to list to execute query
-            for doc in docs:
-                data = doc.to_dict()
-                data['id'] = doc.id
-                return data
-            return None
+            try:
+                query = self.client.collection('users').where(filter=FieldFilter('email', '==', email)).limit(1)
+                # Iterate with limit to avoid waiting for all results
+                for doc in query.stream():
+                    data = doc.to_dict()
+                    data['id'] = doc.id
+                    return data
+                return None
+            except (DeadlineExceeded, RetryError) as e:
+                logger.warning(f"Firestore query timeout for email '{email}': {e}")
+                return None
+            except Exception as e:
+                logger.warning(f"Firestore query error for email '{email}': {e}")
+                return None
         
         try:
-            # Use a 10-second timeout for queries to avoid blocking
+            # Use ThreadPoolExecutor with timeout to prevent blocking
+            # Note: This cancels the future but Firestore query may continue in background
+            # The important thing is it doesn't block the calling thread
             future = _query_executor.submit(_query)
-            result = future.result(timeout=10)
+            result = future.result(timeout=_QUERY_TIMEOUT)
             return result
         except FutureTimeoutError:
-            logger.warning(f"Query timeout while getting user by email '{email}' (10s limit)")
-            return None
-        except (DeadlineExceeded, RetryError) as e:
-            logger.warning(f"Timeout or retry error while getting user by email '{email}': {e}")
+            # Cancel the future to free resources
+            future.cancel()
+            logger.warning(f"Query executor timeout while getting user by email '{email}' (cancelled after {_QUERY_TIMEOUT}s)")
             return None
         except Exception as e:
             logger.error(f"Error getting user by email '{email}': {e}")
