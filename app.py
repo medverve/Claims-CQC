@@ -12,22 +12,40 @@ import json
 import uuid
 import hashlib
 import secrets
+import logging
 from datetime import datetime, date, timezone, timedelta
 from functools import wraps
 from typing import Dict, Any
 import threading
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 app.config.from_object(Config)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# Ensure default admin exists in Firestore
-firestore_service.ensure_default_admin(
-    username='admin',
-    email='admin@example.com',
-    password_hash=generate_password_hash('admin123')
-)
+# Ensure default admin exists in Firestore (non-blocking)
+# Run in background thread to avoid blocking app startup
+def init_default_admin():
+    """Initialize default admin in background to avoid blocking startup."""
+    try:
+        firestore_service.ensure_default_admin(
+            username='admin',
+            email='admin@example.com',
+            password_hash=generate_password_hash('admin123')
+        )
+    except Exception as e:
+        logger.warning(f"Failed to initialize default admin during startup: {e}. App will continue.")
+
+# Start admin initialization in background thread
+admin_init_thread = threading.Thread(target=init_default_admin, daemon=True)
+admin_init_thread.start()
 
 # Create upload directory
 os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)

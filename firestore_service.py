@@ -1,12 +1,21 @@
 import json
+import logging
 from datetime import datetime, date, timezone
 from typing import Optional, Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from google.cloud import firestore
 from google.cloud.firestore import FieldFilter
 from google.oauth2 import service_account
+from google.api_core import retry, timeout
+from google.api_core.exceptions import DeadlineExceeded, RetryError
 
 from config import Config
+
+logger = logging.getLogger(__name__)
+
+# Thread pool for timeout-wrapped queries
+_query_executor = ThreadPoolExecutor(max_workers=5)
 
 
 class FirestoreService:
@@ -16,6 +25,8 @@ class FirestoreService:
         if service_account_json:
             info = json.loads(service_account_json)
             credentials = service_account.Credentials.from_service_account_info(info)
+        # Initialize client - this doesn't connect immediately (lazy connection)
+        # Connection happens on first query, which we've wrapped with timeouts
         self.client = firestore.Client(
             project=Config.FIRESTORE_PROJECT_ID,
             database=Config.FIRESTORE_DATABASE_ID,
@@ -24,20 +35,54 @@ class FirestoreService:
 
     # ---------------------- Users ----------------------
     def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
-        docs = self.client.collection('users').where(filter=FieldFilter('username', '==', username)).limit(1).stream()
-        for doc in docs:
-            data = doc.to_dict()
-            data['id'] = doc.id
-            return data
-        return None
+        def _query():
+            query = self.client.collection('users').where(filter=FieldFilter('username', '==', username)).limit(1)
+            docs = list(query.stream())  # Convert to list to execute query
+            for doc in docs:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                return data
+            return None
+        
+        try:
+            # Use a 10-second timeout for queries to avoid blocking
+            future = _query_executor.submit(_query)
+            result = future.result(timeout=10)
+            return result
+        except FutureTimeoutError:
+            logger.warning(f"Query timeout while getting user by username '{username}' (10s limit)")
+            return None
+        except (DeadlineExceeded, RetryError) as e:
+            logger.warning(f"Timeout or retry error while getting user by username '{username}': {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting user by username '{username}': {e}")
+            return None
 
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
-        docs = self.client.collection('users').where(filter=FieldFilter('email', '==', email)).limit(1).stream()
-        for doc in docs:
-            data = doc.to_dict()
-            data['id'] = doc.id
-            return data
-        return None
+        def _query():
+            query = self.client.collection('users').where(filter=FieldFilter('email', '==', email)).limit(1)
+            docs = list(query.stream())  # Convert to list to execute query
+            for doc in docs:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                return data
+            return None
+        
+        try:
+            # Use a 10-second timeout for queries to avoid blocking
+            future = _query_executor.submit(_query)
+            result = future.result(timeout=10)
+            return result
+        except FutureTimeoutError:
+            logger.warning(f"Query timeout while getting user by email '{email}' (10s limit)")
+            return None
+        except (DeadlineExceeded, RetryError) as e:
+            logger.warning(f"Timeout or retry error while getting user by email '{email}': {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting user by email '{email}': {e}")
+            return None
 
     def create_user(self, username: str, email: str, password_hash: str, is_admin: bool = False) -> str:
         doc_ref = self.client.collection('users').document()
@@ -226,8 +271,23 @@ class FirestoreService:
 
     # ---------------------- Helper ----------------------
     def ensure_default_admin(self, username: str, email: str, password_hash: str) -> None:
-        if not self.get_user_by_username(username):
-            self.create_user(username=username, email=email, password_hash=password_hash, is_admin=True)
+        """
+        Ensure default admin user exists. Handles timeouts gracefully to avoid blocking app startup.
+        """
+        try:
+            # Use a short timeout to avoid blocking startup
+            existing_user = self.get_user_by_username(username)
+            if not existing_user:
+                try:
+                    self.create_user(username=username, email=email, password_hash=password_hash, is_admin=True)
+                    logger.info(f"Created default admin user: {username}")
+                except Exception as e:
+                    logger.error(f"Failed to create default admin user '{username}': {e}")
+            else:
+                logger.debug(f"Default admin user '{username}' already exists")
+        except Exception as e:
+            # Log but don't raise - allow app to start even if admin creation fails
+            logger.warning(f"Could not ensure default admin user '{username}': {e}. App will continue to start.")
 
 
 firestore_service = FirestoreService()
