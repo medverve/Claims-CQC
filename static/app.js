@@ -21,7 +21,16 @@ function connectSocket(sessionId) {
         socket.disconnect();
     }
     
-    socket = io();
+    // Configure Socket.IO for Cloud Run compatibility
+    // Use polling transport and shorter timeouts to avoid 300s Cloud Run limit
+    socket = io({
+        transports: ['polling'],  // Use polling instead of websocket for Cloud Run compatibility
+        timeout: 20000,  // 20 second timeout (well below Cloud Run's 300s limit)
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        reconnectionAttempts: 5
+    });
     currentSessionId = sessionId;
     
     socket.on('connect', () => {

@@ -28,7 +28,19 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, static_folder='static', static_url_path='')
 app.config.from_object(Config)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# Configure Socket.IO for Cloud Run compatibility
+# Cloud Run has a 300s request timeout, so we need shorter ping intervals
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='threading',
+    ping_timeout=20,  # Wait 20 seconds for pong response (well below Cloud Run's 300s limit)
+    ping_interval=10,  # Send ping every 10 seconds to keep connection alive
+    max_http_buffer_size=1e8,  # 100MB buffer for large messages
+    logger=False,  # Disable Socket.IO logging to reduce noise
+    engineio_logger=False
+)
 
 # Ensure default admin exists in Firestore (non-blocking)
 # Run in background thread to avoid blocking app startup
